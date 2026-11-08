@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<!-- admin/index.html — 后台管理单页（SPA）骨架：登录/初始化/恢复与全部管理视图都由 admin.js 渲染进 #view。
+     本文件只是壳：样式 admin.css、逻辑 admin.js；所有数据都走 /api/admin/* 真接口，不含任何写死数据。
+     注意：本页由 Pages 作为静态文件直出（/admin/），接口鉴权靠会话 Cookie，与页面本身无关。 -->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex, nofollow">
+<title>后台管理 · ym-blog</title>
+<link rel="stylesheet" href="/admin/admin.css">
+</head>
+<body>
+  <!-- 顶栏：站名 + 待审角标 + 查看站点 + 退出（登录后才显示） -->
+  <header id="topbar" class="topbar" hidden>
+    <div class="topbar-in">
+      <strong id="brand" class="brand">博客后台</strong>
+      <span id="pendingBadge" class="badge" hidden title="待审评论（Pending comments）">0</span>
+      <span class="spacer"></span>
+      <a class="btn ghost sm" href="/" target="_blank" rel="noopener">查看站点 ↗</a>
+      <button id="logoutBtn" class="btn ghost sm" type="button">退出（Logout）</button>
+    </div>
+    <!-- 视图导航：吸顶、手机上横向滑动，触控目标 ≥44px -->
+    <nav id="viewnav" class="viewnav" aria-label="后台视图"></nav>
+  </header>
+
+  <main id="view" class="view">
+    <p class="loading">正在连接后台…</p>
+  </main>
+
+  <!-- 通用弹层（确认框/媒体选择/恢复码展示等）与轻提示 -->
+  <div id="modalRoot"></div>
+  <div id="toastRoot" class="toast-root" aria-live="polite"></div>
+
+<script src="/admin/admin.js" defer></script>
+</body>
+</html>
