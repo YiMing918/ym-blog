@@ -1,0 +1,1 @@
+{"description":"ym-blog 路由表（Cloudflare Pages 官方机制，须放在部署根目录）：/assets/* 与 /admin/* 是纯静态文件，排除出 Functions 调用、由 Pages 静态层直出（不计 Functions 请求数）；其余全部路径（访客 SSR、/api/*、/rss、/sitemap.xml、/robots.txt）继续 include 走函数。本文件缺失或没进部署包时，根目录的 catch-all 函数会把静态路径一并接管且无对应 handler，/assets/* 与 /admin/* 就会全 404——见 MAINTENANCE.md 故障对照表。","exclude":["/assets/*","/admin/*"],"include":["/*"],"version":1}
