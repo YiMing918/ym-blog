@@ -1,0 +1,12 @@
+# 本地杂物与密钥，绝不进仓库
+.heartbeat
+__pycache__/
+*.pyc
+node_modules/
+.wrangler/
+.dev.vars
+.dev.vars.*
+*.local.*
+SMOKE.local.md
+dist/
+.DS_Store
