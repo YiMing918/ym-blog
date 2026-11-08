@@ -1,0 +1,30 @@
+name: watchdog
+
+# 看门狗：每天巡检线上站点（首页/RSS/任务健康端点），异常开 Issue 留痕，全好静默；
+# 附带心跳保活：GitHub 会停用 60 天无活动的定时任务，超 25 天无提交时脚本会留一个时间戳提交。
+# 可选 Secrets：SITE_URL（自有域名，如 https://blog.example.com；不配则按 https://<仓库名>.pages.dev 猜）
+#              TASK_SECRET（与站点 Pages 环境变量里的 TASK_SECRET 一致，才查得到备份新鲜度）
+
+on:
+  schedule:
+    - cron: '23 0 * * *'   # UTC 00:23 ≈ 北京时间 08:23
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  watchdog:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: 巡检
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SITE_URL: ${{ secrets.SITE_URL }}
+          TASK_SECRET: ${{ secrets.TASK_SECRET }}
+        run: python scripts/watchdog.py

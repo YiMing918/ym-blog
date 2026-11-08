@@ -1,0 +1,23 @@
+name: purge
+
+# 每日清理：调站内任务接口，真删超期的回收站文章/评论/附件、过期会话与令牌、超 24 小时没传完的半成品媒体记录。
+# 任务接口本身幂等，多跑一遍无副作用。必需 Secrets：SITE_URL、TASK_SECRET（同 friend-check）。
+
+on:
+  schedule:
+    - cron: '17 19 * * *'   # UTC 19:17 ≈ 北京时间次日 03:17（凌晨低峰）
+  workflow_dispatch:
+
+jobs:
+  purge:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 调清理任务
+        env:
+          SITE_URL: ${{ secrets.SITE_URL }}
+          TASK_SECRET: ${{ secrets.TASK_SECRET }}
+        run: |
+          if [ -z "$SITE_URL" ] || [ -z "$TASK_SECRET" ]; then
+            echo "未配置 SITE_URL / TASK_SECRET，跳过。"; exit 0
+          fi
+          curl -fsS -X POST "$SITE_URL/api/tasks/purge" -H "X-Task-Secret: $TASK_SECRET" -H "Content-Type: application/json" -d '{}'

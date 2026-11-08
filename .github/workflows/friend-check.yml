@@ -1,0 +1,25 @@
+name: friend-check
+
+# 友链探活：每 20 分钟调一次站内任务接口，逐条查友链首页还通不通，结果回写到站点里
+# （连续失败的友链前台会自动置灰、后台会标红，不用站长操心）。
+# 必需 Secrets：SITE_URL（站点地址，如 https://blog.example.com）、TASK_SECRET（与站点环境变量一致）。
+# 没配齐就直接跳过，不报错刷屏。
+
+on:
+  schedule:
+    - cron: '*/20 * * * *'
+  workflow_dispatch:
+
+jobs:
+  friend-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 调友链探活任务
+        env:
+          SITE_URL: ${{ secrets.SITE_URL }}
+          TASK_SECRET: ${{ secrets.TASK_SECRET }}
+        run: |
+          if [ -z "$SITE_URL" ] || [ -z "$TASK_SECRET" ]; then
+            echo "未配置 SITE_URL / TASK_SECRET，跳过。"; exit 0
+          fi
+          curl -fsS -X POST "$SITE_URL/api/tasks/friend-check" -H "X-Task-Secret: $TASK_SECRET" -H "Content-Type: application/json" -d '{}'
