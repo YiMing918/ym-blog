@@ -1,0 +1,70 @@
+name: backup
+
+# 每周双通道自动备份（两条管线互备，一条断了还有另一条）：
+# 通道一：调站内 /api/tasks/backup —— 按表导出 JSON 存进私有备份桶并登记对账（保留最近 12 期）。
+# 通道二：整库 SQL 导出，存为本仓库 Actions 的构建产物（artifact），保留 90 天。
+#   固定走 scripts/d1-dump.mjs 逐表导出（经 D1 HTTP API：结构取 sqlite_master、
+#   数据按父表优先顺序逐表拼 SQL，FTS 只出建表语句、恢复后由文件末尾的 rebuild 重建）。
+#   为什么不用官方 wrangler d1 export：本库自 v1.1.0 起有 FTS5 虚拟表（schema/0003
+#   的 posts_fts），官方导出对含虚拟表的库会被服务端按平台限制直接拒绝（官方文档
+#   Known limitations）——这是永久性限制、不是偶发失败，没有「先试官方再兜底」一说；
+#   且 wrangler 本人对仅 D1 Read 的专用令牌过不了鉴权（2026-11-10 实测 Authentication
+#   error code 10000）。逐表导出只需 D1 Read 即可，故通道二固定逐表导出这一条正路。
+#   导出失败就让任务变红示警，绝不静默跳过——备份通道宁可报错也不能装睡。
+# 通道二需要 D1_EXPORT_TOKEN（专用令牌、只给 D1 读权限，不与 deploy 共用）/
+# CLOUDFLARE_ACCOUNT_ID / D1_DATABASE_ID 三个 Secret，由 job 的 env 直接注入
+# d1-dump.mjs，不经 wrangler、也不动 wrangler.toml。三个 Secret 缺任一时自动
+# 跳过通道二，不影响通道一。
+# 两条通道串行（通道二 needs 通道一）：2026-11-10 首跑时两 job 并行，通道二的导出
+# 尝试占用 D1 期间，通道一的站内备份接口吃了 500（官方导出会阻塞库的其他请求，
+# 平台已知限制）。此后固定串行、互不干扰；通道一失败时通道二照常跑（if: always()），
+# 互备不变。
+
+on:
+  schedule:
+    - cron: '41 20 * * 0'   # UTC 周日 20:41 ≈ 北京时间周一 04:41
+  workflow_dispatch:
+
+jobs:
+  backup-api:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 调站内备份任务（通道一）
+        env:
+          SITE_URL: ${{ secrets.SITE_URL }}
+          TASK_SECRET: ${{ secrets.TASK_SECRET }}
+        run: |
+          if [ -z "$SITE_URL" ] || [ -z "$TASK_SECRET" ]; then
+            echo "未配置 SITE_URL / TASK_SECRET，跳过通道一。"; exit 0
+          fi
+          # 备份接口幂等：偶发 500（如边缘/库瞬时繁忙）自动重试，重复触发只多一份
+          # 登记、保留期会自动收敛，不产生脏数据。
+          curl -fsS --retry 3 --retry-delay 15 --retry-all-errors -X POST "$SITE_URL/api/tasks/backup" -H "X-Task-Secret: $TASK_SECRET" -H "Content-Type: application/json" -d '{}'
+
+  backup-d1-export:
+    needs: backup-api
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    env:
+      D1_EXPORT_TOKEN: ${{ secrets.D1_EXPORT_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      D1_DATABASE_ID: ${{ secrets.D1_DATABASE_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: 整库 SQL 导出（逐表导出，绕过 FTS5 虚拟表限制）
+        if: ${{ env.D1_EXPORT_TOKEN != '' && env.CLOUDFLARE_ACCOUNT_ID != '' && env.D1_DATABASE_ID != '' }}
+        run: |
+          # 本站库含 FTS5 虚拟表（posts_fts），官方 wrangler d1 export 对含虚拟表的库
+          # 会被平台永久拒绝，故通道二固定走逐表导出：d1-dump.mjs 经 D1 HTTP API
+          # 取结构与数据拼成整库 SQL（FTS 只出建表语句、恢复后由末尾 rebuild 重建），
+          # 只需 D1 Read 令牌，三个 Secret 已由 job 的 env 注入。导出失败即整步变红。
+          node scripts/d1-dump.mjs --output backup-d1.sql
+          ls -la backup-d1.sql
+      - name: 上传 SQL 产物（保留 90 天）
+        if: ${{ env.D1_EXPORT_TOKEN != '' && env.CLOUDFLARE_ACCOUNT_ID != '' && env.D1_DATABASE_ID != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: d1-export
+          path: backup-d1.sql
+          retention-days: 90
+          if-no-files-found: ignore
