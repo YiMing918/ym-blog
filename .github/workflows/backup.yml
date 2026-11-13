@@ -2,7 +2,13 @@ name: backup
 
 # 每周双通道自动备份（两条管线互备，一条断了还有另一条）：
 # 通道一：调站内 /api/tasks/backup —— 按表导出 JSON 存进私有备份桶并登记对账（保留最近 12 期）。
-# 通道二：整库 SQL 导出，存为本仓库 Actions 的构建产物（artifact），保留 90 天。
+# 通道二：整库 SQL 导出，加密后存为本仓库 Actions 的构建产物（artifact），保留 90 天。
+#   ⚠️ 产物可见性（2026-11-13 v1.2.0 起改）：公开仓库的 artifact 任何登录
+#   GitHub 的人都能下载，明文整库 SQL 等于把数据库公开。故产物上传前必须
+#   先用 BACKUP_PASSPHRASE 加密（openssl AES-256）；没配这个 Secret 时
+#   只导出校验、不上传。解密：openssl enc -d -aes-256-cbc -pbkdf2
+#   -in backup-d1.sql.enc -out backup-d1.sql -pass pass:<你的口令>。
+#   另外 d1-dump 已按排除名单不导出凭据/运行态表数据（见 scripts/d1-dump.mjs）。
 #   固定走 scripts/d1-dump.mjs 逐表导出（结构解析自仓库 schema/ 迁移文件、
 #   数据经 D1 HTTP API 按父表优先顺序逐表拼 SQL，FTS 只出建表语句、恢复后由
 #   文件末尾的 rebuild 重建）。为什么结构不向 D1 问：SELECT sqlite_master 经
@@ -53,6 +59,7 @@ jobs:
       D1_EXPORT_TOKEN: ${{ secrets.D1_EXPORT_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       D1_DATABASE_ID: ${{ secrets.D1_DATABASE_ID }}
+      BACKUP_PASSPHRASE: ${{ secrets.BACKUP_PASSPHRASE }}
     steps:
       - uses: actions/checkout@v4
       - name: 整库 SQL 导出（逐表导出，绕过 FTS5 虚拟表限制）
@@ -65,11 +72,21 @@ jobs:
           # env 注入。导出失败即整步变红。
           node scripts/d1-dump.mjs --output backup-d1.sql
           ls -la backup-d1.sql
-      - name: 上传 SQL 产物（保留 90 天）
-        if: ${{ env.D1_EXPORT_TOKEN != '' && env.CLOUDFLARE_ACCOUNT_ID != '' && env.D1_DATABASE_ID != '' }}
+      - name: 加密 SQL 产物（公开仓库的 artifact 人人可下载，必须加密）
+        if: ${{ env.D1_EXPORT_TOKEN != '' && env.CLOUDFLARE_ACCOUNT_ID != '' && env.D1_DATABASE_ID != '' && env.BACKUP_PASSPHRASE != '' }}
+        run: |
+          openssl enc -aes-256-cbc -salt -pbkdf2 -in backup-d1.sql -out backup-d1.sql.enc -pass env:BACKUP_PASSPHRASE
+          rm backup-d1.sql
+          ls -la backup-d1.sql.enc
+      - name: 上传加密产物（保留 90 天）
+        if: ${{ env.D1_EXPORT_TOKEN != '' && env.CLOUDFLARE_ACCOUNT_ID != '' && env.D1_DATABASE_ID != '' && env.BACKUP_PASSPHRASE != '' }}
         uses: actions/upload-artifact@v4
         with:
           name: d1-export
-          path: backup-d1.sql
+          path: backup-d1.sql.enc
           retention-days: 90
           if-no-files-found: ignore
+      - name: 未配 BACKUP_PASSPHRASE 时跳过上传
+        if: ${{ env.D1_EXPORT_TOKEN != '' && env.CLOUDFLARE_ACCOUNT_ID != '' && env.D1_DATABASE_ID != '' && env.BACKUP_PASSPHRASE == '' }}
+        run: |
+          echo "::warning::未配置 BACKUP_PASSPHRASE，本次只导出校验、未上传产物（公开仓库的明文 artifact 等于公开数据库）。到仓库 Settings → Secrets 添加 BACKUP_PASSPHRASE 后即恢复双通道备份。"
