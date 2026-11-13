@@ -4,12 +4,13 @@
 // 私密文一律返回 404 假象，不泄露存在性；密码文未解锁只出解锁页。
 
 import { all, first } from '../_lib/db.js';
-import { esc, nowSec, isoOf } from '../_lib/http.js';
+import { esc, nowSec, isoOf, ipHash } from '../_lib/http.js';
 import { getSettings } from '../_lib/settings.js';
 import { getSessionUser } from '../_lib/auth.js';
 import { hashSecret } from '../_lib/hash.js';
-import { isPubliclyVisible, isUnlocked } from './public-api.js';
-import { renderCommentText } from '../_lib/sanitize.js';
+import { checkLimit } from '../_lib/ratelimit.js';
+import { isPubliclyVisible, isUnlocked, maskExcerpt } from './public-api.js';
+import { renderCommentText, safeUrl } from '../_lib/sanitize.js';
 import { renderMarkdown, readingMinutes } from '../_lib/render.js';
 import { hotPosts, postTotalViews } from '../_lib/stats.js';
 import { publicMediaUrl } from '../_lib/r2sign.js';
@@ -23,7 +24,7 @@ function themeAttr(settings) {
   return ' data-theme="auto"';
 }
 
-async function layout(env, request, settings, { title, body, desc = '', adminUser = null, extraHead = '', ogImage = '' }) {
+async function layout(env, request, settings, { title, body, desc = '', adminUser = null, extraHead = '', ogImage = '', privateCache = false }) {
   const s = settings;
   // 卡片列数（v1.1.5）：设置已由 validateSetting 限定取值，这里再兜一层防脏数据进 CSS。
   const colsPc = ['1', '2', '3', '4'].includes(String(s.layout_home_cols_pc)) ? String(s.layout_home_cols_pc) : '2';
@@ -75,7 +76,10 @@ ${body}
   return new Response(html, {
     headers: {
       'Content-Type': 'text/html; charset=utf-8',
-      ...(adminUser ? { 'Cache-Control': 'private, no-store' } : { 'Cache-Control': 'public, max-age=60' }),
+      // privateCache：密码文章（锁定页与解锁后正文）与草稿预览都是
+      // 「凭密码/Cookie/密钥才能看」的内容，一律不许共享缓存存——旧版
+      // 只看站长登录态，访客解锁后的正文带着 public 头出去（审查 A#1/B#12）
+      ...((adminUser || privateCache) ? { 'Cache-Control': 'private, no-store' } : { 'Cache-Control': 'public, max-age=60' }),
     },
   });
 }
@@ -91,12 +95,13 @@ async function coverUrlOf(env, post) {
 
 function postListItem(post, cover, settings) {
   const date = fmtDate(post.publish_at || post.created_at);
+  const excerpt = maskExcerpt(post);
   if (settings.layout_home === 'list') {
     return `<article class="post-row">
       ${cover ? `<a class="row-thumb" href="/post/${esc(post.slug)}"><img src="${esc(cover)}" alt="" loading="lazy"></a>` : ''}
       <div class="row-main">
         <h3><a href="/post/${esc(post.slug)}">${post.is_sticky ? '📌 ' : ''}${esc(post.title)}</a></h3>
-        <p class="excerpt">${esc(post.excerpt || '')}</p>
+        <p class="excerpt">${esc(excerpt)}</p>
         <p class="meta">${date} · 约 ${post.word_count || 0} 字</p>
       </div>
     </article>`;
@@ -105,7 +110,7 @@ function postListItem(post, cover, settings) {
     ${cover ? `<a class="card-cover" href="/post/${esc(post.slug)}"><img src="${esc(cover)}" alt="" loading="lazy"></a>` : ''}
     <div class="card-body">
       <h3><a href="/post/${esc(post.slug)}">${post.is_sticky ? '📌 ' : ''}${esc(post.title)}</a></h3>
-      <p class="excerpt">${esc(post.excerpt || '')}</p>
+      <p class="excerpt">${esc(excerpt)}</p>
       <p class="meta">${date} · 约 ${post.word_count || 0} 字</p>
     </div>
   </article>`;
@@ -225,16 +230,29 @@ export async function handlePages(env, request, method, path, url) {
     const q = (url.searchParams.get('q') || '').trim().slice(0, 60);
     let resultsHtml = '';
     if (q) {
+      // 与 /api/search 同口径限流：旧版页面搜索不限流，短词 LIKE 全表
+      // 扫描能被刷爆 D1 读额度（2026-11-13 三方审查 B#8）。
+      const rl = await checkLimit(env, settings, 'search', await ipHash(env, request));
+      if (!rl.allowed) {
+        const resp = await layout(env, request, settings, {
+          title: '搜索', adminUser,
+          body: '<h1 class="page-title">搜索（Search）</h1><p class="empty">搜索太频繁，请稍后再试。</p>',
+        });
+        return new Response(resp.body, { status: 429, headers: resp.headers });
+      }
       // 先走 FTS5 trigram 全文索引（schema/0003）：中文切 3 字片段，子串命中并按相关度排序。
       // 退回 LIKE 的三种情况：词太短（<3 字切不出片段）、索引表还没建（迁移未跑，查询抛错）、
       // 索引无命中（LIKE 再兜一次保证召回不劣于旧版）。任何情况下行为都不比旧搜索差。
+      // 密码文章只许按标题命中：FTS 分支整篇排除（索引含正文，按正文命中
+      // 等于给外人一个逐词试探正文的预言机）；LIKE 分支正文/摘要条件同样
+      // 只对无密码文章生效，标题命中时摘要由 postListItem 统一打码。
       let rows = null;
       const tokens = q.replace(/["*()^]/g, ' ').split(/\s+/).filter((w) => w.length >= 3);
       if (tokens.length) {
         try {
           const match = tokens.map((w) => `"${w}"`).join(' OR ');
           rows = await all(env, `SELECT p.* FROM posts p JOIN posts_fts f ON f.rowid = p.id
-            WHERE posts_fts MATCH ? AND p.type='post'
+            WHERE posts_fts MATCH ? AND p.type='post' AND p.password_hash IS NULL
             AND (p.status='published' OR (p.status='scheduled' AND p.publish_at<=?))
             ORDER BY rank LIMIT 20`, match, t);
         } catch { rows = null; }
@@ -242,7 +260,7 @@ export async function handlePages(env, request, method, path, url) {
       if (!rows || !rows.length) {
         const like = `%${q.replace(/[%_]/g, '')}%`;
         rows = await all(env, `SELECT * FROM posts WHERE type='post' AND ${pubCond}
-          AND (title LIKE ? OR excerpt LIKE ? OR content_md LIKE ?) ORDER BY publish_at DESC LIMIT 20`, t, like, like, like);
+          AND (title LIKE ? OR (password_hash IS NULL AND (excerpt LIKE ? OR content_md LIKE ?))) ORDER BY publish_at DESC LIMIT 20`, t, like, like, like);
       }
       const cards = [];
       for (const p of rows) cards.push(postListItem(p, await coverUrlOf(env, p), settings));
@@ -265,8 +283,12 @@ export async function handlePages(env, request, method, path, url) {
     const links = await all(env, 'SELECT * FROM friend_links WHERE enabled = 1 ORDER BY sort_order, id');
     const body = `<h1 class="page-title">友链（Links）</h1><div class="link-grid">${links.map((l) => {
       const dead = l.health === 'fail' && (l.fail_streak || 0) >= 3;
-      return `<a class="link-card${dead ? ' link-dead' : ''}" href="${esc(l.url)}" target="_blank" rel="noopener">
-        ${l.avatar_url ? `<img src="${esc(l.avatar_url)}" alt="" loading="lazy">` : ''}
+      // 渲染兜底：写入侧已校验协议（admin-api），这里再用 safeUrl 过一遍，
+      // 历史脏数据里的 javascript: 等协议不会进 href（审查 B#14）
+      const href = safeUrl(l.url) || '#';
+      const avatar = l.avatar_url ? safeUrl(l.avatar_url) : null;
+      return `<a class="link-card${dead ? ' link-dead' : ''}" href="${esc(href)}" target="_blank" rel="noopener">
+        ${avatar ? `<img src="${esc(avatar)}" alt="" loading="lazy">` : ''}
         <span class="link-name">${esc(l.name)}</span>
         <span class="link-desc">${esc(l.desc || '')}</span>
         ${dead ? '<span class="link-dead-note">暂时打不开</span>' : ''}
@@ -278,8 +300,14 @@ export async function handlePages(env, request, method, path, url) {
 
   // ---------- 关于 ----------
   if (path === '/about') {
-    const post = await first(env, "SELECT * FROM posts WHERE slug='about' AND type='page' AND status='published'");
+    const post = await first(env, `SELECT * FROM posts WHERE slug='about' AND type='page' AND ${pubCond}`, t);
     if (!post) return notFoundPage(env, request, settings, adminUser);
+    // 关于页若设了文章密码，与普通文章同口径：未解锁只出解锁页
+    // （旧版直接输出正文、绕过密码检查；审查 A#2）。定时口径也与
+    // 其他页面统一走 pubCond（旧版只认 published，审查 B#7）。
+    if (post.password_hash) {
+      return renderPostPage(env, request, settings, post, { adminUser, draft: false });
+    }
     const rendered = post.rendered_html || renderMarkdown(post.content_md).html;
     const body = `<article class="article${settings.layout_post_width === 'wide' ? ' wide' : ''}"><h1 class="page-title">${esc(post.title)}</h1><div class="article-body">${rendered}</div></article>`;
     return layout(env, request, settings, { title: post.title, body, adminUser });
@@ -300,7 +328,7 @@ async function renderPostPage(env, request, settings, post, { adminUser, draft }
         <input type="password" name="password" placeholder="文章密码" autocomplete="off" required>
         <button type="submit">解锁</button>
       </form><p class="form-msg" id="unlockMsg"></p></article>`;
-    return layout(env, request, settings, { title: post.title, body, adminUser });
+    return layout(env, request, settings, { title: post.title, body, adminUser, privateCache: true, extraHead: '<meta name="robots" content="noindex">' });
   }
   const rendered = post.rendered_html || renderMarkdown(post.content_md).html;
   // TOC：从渲染结果里抽 h2/h3（锚点在 render 时已写入）
@@ -372,7 +400,16 @@ async function renderPostPage(env, request, settings, post, { adminUser, draft }
     </nav>
   </article>
   ${commentsHtml}`;
-  return layout(env, request, settings, { title: post.title, body, adminUser, desc: post.excerpt || '', ogImage: (await coverUrlOf(env, post)) || '' });
+  // 密码文章（已解锁正文）与草稿预览：私有缓存 + 预览/密码页加 noindex
+  // （robots.txt 的 Disallow 不能代替 noindex；审查 A#1/B#12）
+  const priv = draft || !!post.password_hash;
+  return layout(env, request, settings, {
+    title: post.title, body, adminUser,
+    desc: post.password_hash ? '' : (post.excerpt || ''),
+    ogImage: (await coverUrlOf(env, post)) || '',
+    privateCache: priv,
+    extraHead: priv ? '<meta name="robots" content="noindex">' : '',
+  });
 }
 
 export async function notFoundPage(env, request, settings, adminUser) {

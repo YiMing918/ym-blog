@@ -125,6 +125,7 @@ Cloudflare Pages（静态直出后台 SPA + 访客页）+ Pages Functions 原生
 | `schema/0001_init.sql` / `0002_seed.sql` | 全部 21 张表与索引 / 初始设置与示例内容 |
 | `schema/0003_fts.sql` | 全文搜索索引（FTS5+trigram 虚拟表与同步触发器）；索引损坏或整站恢复后重跑本文件末尾的 rebuild 语句即可重建；注意：有它在，官方整库导出（wrangler d1 export）会被平台永久拒绝，属预期；整库备份由通道二逐表 SQL 导出承担（`scripts/d1-dump.mjs`，结构源自 `schema/` 迁移文件） |
 | `schema/0004_media_trash.sql` | 媒体回收站保留期：给 `media` 加 `trashed_at`（移入回收站落时间戳、还原清空，purge 只真删到期的）；`ADD COLUMN` 不可重复执行，跑前先 `PRAGMA table_info(media);` 确认列不存在；升级必须先跑它再部署代码 |
+| `schema/0005_comment_trash.sql` | 评论回收站保留期：给 `comments` 加 `trashed_at`（v1.2.0 起评论状态变更落时间戳、purge 按它算保留期）；`ADD COLUMN` 不可重复执行，跑前先 `PRAGMA table_info(comments);` 确认列不存在；与 0004 不同，本迁移**不挑顺序**——代码对缺列有兜底（退回按 created_at 清理），有空再跑即可 |
 | `scripts/smoke.mjs` | 本地冒烟：真 SQL 迁移 + D1/R2 内存替身，全链 100+ 检查 |
 | `scripts/watchdog.py` | 巡检 + Issue + 心跳保活（标准库 only） |
 | `scripts/d1-dump.mjs` | 备份通道二：整库 SQL 逐表导出（结构解析自 `schema/` 迁移、数据经 D1 HTTP API 显式列名逐表拼装，FTS 只出建表语句、末尾 rebuild）；只读 `D1_EXPORT_TOKEN` / `CLOUDFLARE_ACCOUNT_ID` / `D1_DATABASE_ID` 三个环境变量；不要给它加 sqlite_master / PRAGMA 自省语句（会被 D1 授权器以 SQLITE_AUTH 拒绝） |

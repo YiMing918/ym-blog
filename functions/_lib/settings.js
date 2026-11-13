@@ -9,6 +9,9 @@ import { nowSec } from './http.js';
 export const SETTING_DEFS = {
   site_name:           { def: '示例博客', type: 'string' },
   site_desc:           { def: '', type: 'string' },
+  // 站长在评论区的显示名：绝不能用登录用户名——用户名一旦随评论公开，
+  // 就成了撞库与恶意锁号的靶子（2026-11-13 三方审查 B#9）
+  author_nickname:     { def: '站长', type: 'string' },
   hero_title:          { def: '', type: 'string' },
   hero_text:           { def: '', type: 'string' },
   avatar_media_id:     { def: 0, type: 'int' },

@@ -3,7 +3,7 @@
 // 写接口除 Cookie 外还要带 X-Requested-With: fetch 头（CSRF 双保险，配合 SameSite=Lax）。
 
 import { run, first, all } from './db.js';
-import { nowSec, sha256Hex, unauthorized, HttpError } from './http.js';
+import { nowSec, sha256Hex, unauthorized, HttpError, ipHash } from './http.js';
 import { hashPassword, hashSecret } from './hash.js';
 
 export const SESSION_COOKIE = 'bk_session';
@@ -29,7 +29,6 @@ export async function createSession(env, request, userId) {
   const token = [...crypto.getRandomValues(new Uint8Array(32))].map((b) => b.toString(16).padStart(2, '0')).join('');
   const tokenHash = await sha256Hex(token);
   const t = nowSec();
-  const { ipHash } = await import('./http.js');
   await run(env, 'INSERT INTO sessions (token_hash, user_id, created_at, expires_at, last_seen_at, ip_hash, ua) VALUES (?, ?, ?, ?, ?, ?, ?)',
     tokenHash, userId, t, t + SESSION_TTL, t, await ipHash(env, request), (request.headers.get('user-agent') || '').slice(0, 200));
   return token;
@@ -39,11 +38,17 @@ export async function getSessionUser(env, request) {
   const token = readCookie(request, SESSION_COOKIE);
   if (!token) return null;
   const tokenHash = await sha256Hex(token);
-  const row = await first(env, 'SELECT s.user_id, s.expires_at, u.username, u.role FROM sessions s JOIN admin_users u ON u.id = s.user_id WHERE s.token_hash = ?', tokenHash);
+  const row = await first(env, 'SELECT s.user_id, s.expires_at, s.last_seen_at, u.username, u.role FROM sessions s JOIN admin_users u ON u.id = s.user_id WHERE s.token_hash = ?', tokenHash);
   if (!row) return null;
-  if (row.expires_at <= nowSec()) {
+  const t = nowSec();
+  if (row.expires_at <= t) {
     await run(env, 'DELETE FROM sessions WHERE token_hash = ?', tokenHash);
     return null;
+  }
+  // 最后活跃时间：旧版只读不写，后台会话列表里永远等于登录时间。
+  // 节流到 1 小时才回写一次，避免每个请求都烧一次 D1 写。
+  if ((row.last_seen_at || 0) < t - 3600) {
+    await run(env, 'UPDATE sessions SET last_seen_at = ? WHERE token_hash = ?', t, tokenHash).catch(() => {});
   }
   return { id: row.user_id, username: row.username, role: row.role };
 }
@@ -94,13 +99,22 @@ export async function needsSetup(env) {
 export async function createAdminUser(env, username, password) {
   const hash = await hashPassword(env, password);
   const t = nowSec();
-  const r = await run(env, 'INSERT INTO admin_users (username, password_hash, password_updated_at, created_at) VALUES (?, ?, ?, ?)',
+  // 原子建号：INSERT ... SELECT ... WHERE NOT EXISTS——并发的首访请求
+  // 只有一个能插入，其余 changes=0 返回 null（旧版先查后插有竞态窗口，
+  // 极端情况下会建出两个站长；2026-11-13 三方审查 B#10）。
+  const r = await run(env, `INSERT INTO admin_users (username, password_hash, password_updated_at, created_at)
+    SELECT ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM admin_users)`,
     String(username).slice(0, 64), hash, t, t);
+  if (!r.meta.changes) return null;
   return r.meta.last_row_id;
 }
 
-// ---- 登录锁定（双轨之一：同账号累计失败锁定，同 IP 走 rate_limits）----
+// ---- 登录锁定（双轨之一：失败锁定，同 IP 另走 rate_limits）----
 // 规则：连错 5 次锁 15 分钟；再犯指数退避 30/60/120…分钟（上限 24 小时）。
+// 计数键由调用方给「用户名|IP哈希」组合（login_guards.username 列存的就是
+// 这个键）：旧版只按用户名计数，而站长用户名会随评论回复公开，任何人连错
+// 5 次就能把站长锁在后台外（2026-11-13 三方审查 B#9）。组合键下，攻击者
+// 只能锁住自己那个 IP 对该账号的尝试，换 IP 重新计数、仍受 IP 限流约束。
 export async function loginLockState(env, username) {
   const g = await first(env, 'SELECT fail_streak, locked_until FROM login_guards WHERE username = ?', username);
   if (!g) return { locked: false, remainSec: 0, streak: 0 };

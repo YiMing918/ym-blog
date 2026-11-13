@@ -67,9 +67,16 @@ async function applyPostWrite(env, post, body, { isNew = false } = {}) {
   }
   const rendered = renderMarkdown(md);
   const doRender = ['published', 'scheduled', 'private'].includes(body.status || post.status);
+  // 摘要：手动填的优先（站长自己写的简介，公开无妨）；自动摘要在文章
+  // 带密码时必须留空——它是从正文截的字，存下来会被列表/搜索/RSS
+  // 原样送出去（2026-11-13 三方审查 B#1）。密码状态先算（下方才赋值的
+  // passwordHash 提前到这里判定，两处口径一致）。
+  const willPassword = body.post_password !== undefined
+    ? (body.post_password ? String(body.post_password) : null)
+    : post.password_hash;
   const excerpt = body.excerpt !== undefined && String(body.excerpt).trim()
     ? String(body.excerpt).slice(0, 300)
-    : excerptOf(md, rendered.text);
+    : (willPassword ? '' : excerptOf(md, rendered.text));
   let coverId = body.cover_media_id !== undefined ? (Number(body.cover_media_id) || null) : post.cover_media_id;
   if (!coverId && firstImageOf(md)) {
     const key = firstImageOf(md).split('/').slice(-4).join('/');
@@ -81,8 +88,11 @@ async function applyPostWrite(env, post, body, { isNew = false } = {}) {
     passwordHash = body.post_password ? await hashPassword(env, String(body.post_password)) : null;
   }
   const status = body.status || post.status;
-  const publishAt = body.publish_at !== undefined ? (Number(body.publish_at) || null)
+  let publishAt = body.publish_at !== undefined ? (Number(body.publish_at) || null)
     : (status === 'scheduled' ? post.publish_at : (status === 'published' && !post.publish_at ? t : post.publish_at));
+  // 定时改立即发布时把未来时间钳到现在：否则「已发布」的文章日期还在
+  // 未来，置顶排序与上下篇导航都会错乱（2026-11-13 三方审查 B 轻微项）
+  if (status === 'published' && publishAt && publishAt > t) publishAt = t;
   await run(env, `UPDATE posts SET slug=?, title=?, content_md=?, rendered_html=?, excerpt=?, cover_media_id=?,
     status=?, publish_at=?, password_hash=?, is_sticky=?, comment_enabled=?, word_count=?, trashed_at=?, updated_at=? WHERE id=?`,
     slug, title, md, doRender ? rendered.html : post.rendered_html, excerpt, coverId,
@@ -394,7 +404,8 @@ export async function handleAdminApi(env, request, method, path, url) {
     const refs = await recountMediaRef(env, row);
     if (refs > 0 && url.searchParams.get('force') !== '1') {
       const usedBy = await all(env, "SELECT title FROM posts WHERE status != 'trash' AND content_md LIKE ? LIMIT 5", `%${row.r2_key}%`);
-      throw new HttpError('in_use', `该文件正被 ${refs} 篇文章引用（${usedBy.map((x) => x.title).join('、')}），确认要删请带 force=1`, 409);
+      // refs 的口径是四处引用合计（正文/封面/说说/头像），文案别只说「篇文章」
+      throw new HttpError('in_use', `该文件正被引用 ${refs} 处（正文/封面/说说/头像合计${usedBy.length ? `，如文章：${usedBy.map((x) => x.title).join('、')}` : ''}），确认要删请带 force=1`, 409);
     }
     // 落 trashed_at：清理任务按它算保留期（默认 30 天），没这个时间戳就无从判断到期与否
     await run(env, "UPDATE media SET status='trashed', trashed_at=? WHERE id = ?", nowSec(), row.id);
@@ -419,22 +430,31 @@ export async function handleAdminApi(env, request, method, path, url) {
   const cmtMatch = path.match(/^\/api\/admin\/comments\/(\d+)\/(approve|reject|spam)$/);
   if (method === 'POST' && cmtMatch) {
     const map = { approve: 'approved', reject: 'trash', spam: 'spam' };
-    await run(env, 'UPDATE comments SET status = ? WHERE id = ?', map[cmtMatch[2]], Number(cmtMatch[1]));
+    const target = map[cmtMatch[2]];
+    await run(env, 'UPDATE comments SET status = ? WHERE id = ?', target, Number(cmtMatch[1]));
+    // 进回收站/垃圾箱落 trashed_at（迁移 0005），purge 按它算 30 天保留期；
+    // 恢复通过则清空。生产库还没跑 0005 时这一句会失败——吞掉，不挡审核。
+    await run(env, 'UPDATE comments SET trashed_at = ? WHERE id = ?',
+      target === 'approved' ? null : nowSec(), Number(cmtMatch[1])).catch(() => {});
     return json({ ok: true });
   }
   const cmtDel = path.match(/^\/api\/admin\/comments\/(\d+)$/);
   if (method === 'DELETE' && cmtDel) {
     await run(env, "UPDATE comments SET status='trash' WHERE id = ?", Number(cmtDel[1]));
+    await run(env, 'UPDATE comments SET trashed_at = ? WHERE id = ?', nowSec(), Number(cmtDel[1])).catch(() => {});
     return json({ ok: true });
   }
   if (method === 'POST' && path === '/api/admin/comments') {
-    // 站长回复：直接通过、带站长标记
+    // 站长回复：直接通过、带站长标记。显示名用设置里的评论昵称，
+    // 绝不用登录用户名（会随评论公开，成撞库/锁号靶子；审查 B#9）
     const body = await readJson(request);
     const postId = Number(body.post_id);
     const content = String(body.content || '').trim();
     if (!postId || !content) throw badRequest('内容不完整');
+    const settings = await getSettings(env);
+    const displayName = String(settings.author_nickname || '站长').slice(0, 30) || '站长';
     const r = await run(env, "INSERT INTO comments (post_id, parent_id, author_name, content, status, is_admin, created_at) VALUES (?, ?, ?, ?, 'approved', 1, ?)",
-      postId, Number(body.parent_id) || 0, me.username, content.slice(0, 2000), nowSec());
+      postId, Number(body.parent_id) || 0, displayName, content.slice(0, 2000), nowSec());
     return json({ id: r.meta.last_row_id });
   }
 
@@ -482,6 +502,15 @@ export async function handleAdminApi(env, request, method, path, url) {
   }
 
   // ---- 友链 ----
+  // 友链三个 URL 字段写入时校验协议：只许 http(s) 或留空。esc() 挡不住
+  // javascript: 进 href——导入恶意备份也能种下存储型 XSS（审查 B#14）；
+  // 渲染侧（pages.js /links）另有 safeUrl 兜底。
+  const checkFriendUrl = (v, label) => {
+    const s = String(v || '').trim();
+    if (!s) return null;
+    if (!/^https?:\/\//i.test(s)) throw badRequest(`${label}只支持 http(s) 链接`);
+    return s.slice(0, 500);
+  };
   if (method === 'GET' && path === '/api/admin/friends') {
     return json({ friends: await all(env, 'SELECT * FROM friend_links ORDER BY sort_order, id') });
   }
@@ -489,7 +518,7 @@ export async function handleAdminApi(env, request, method, path, url) {
     const body = await readJson(request);
     if (!body.name || !body.url) throw badRequest('名称与链接必填');
     const r = await run(env, 'INSERT INTO friend_links (name, url, rss_url, avatar_url, desc, sort_order, enabled, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-      String(body.name).slice(0, 60), String(body.url).slice(0, 500), body.rss_url || null, body.avatar_url || null,
+      String(body.name).slice(0, 60), checkFriendUrl(body.url, '链接'), checkFriendUrl(body.rss_url, 'RSS 地址'), checkFriendUrl(body.avatar_url, '头像地址'),
       String(body.desc || '').slice(0, 200), Number(body.sort_order) || 0, body.enabled === false ? 0 : 1, nowSec());
     return json({ id: r.meta.last_row_id });
   }
@@ -497,7 +526,7 @@ export async function handleAdminApi(env, request, method, path, url) {
   if (frMatch && method === 'PUT') {
     const body = await readJson(request);
     await run(env, 'UPDATE friend_links SET name=?, url=?, rss_url=?, avatar_url=?, desc=?, sort_order=?, enabled=? WHERE id=?',
-      String(body.name || '').slice(0, 60), String(body.url || '').slice(0, 500), body.rss_url || null, body.avatar_url || null,
+      String(body.name || '').slice(0, 60), checkFriendUrl(body.url, '链接'), checkFriendUrl(body.rss_url, 'RSS 地址'), checkFriendUrl(body.avatar_url, '头像地址'),
       String(body.desc || '').slice(0, 200), Number(body.sort_order) || 0, body.enabled === false ? 0 : 1, Number(frMatch[1]));
     return json({ ok: true });
   }
@@ -566,15 +595,20 @@ export async function handleAdminApi(env, request, method, path, url) {
   if (method === 'POST' && path === '/api/admin/import') {
     const body = await readJson(request);
     if (body.confirm !== true) throw badRequest('导入需二次确认：请求体带 confirm=true');
-    // 恢复前强制先备份当前站（学 Halo 的做法）
+    // 恢复前强制先备份当前站（学 Halo 的做法）。旧版备份桶没绑定时
+    // 静默跳过备份照样导入，与「强制先备份」的承诺不符（审查 A#3）：
+    // 没绑定、或备份写入失败，一律终止导入、先把备份通道修好再来。
+    if (!env.BACKUPS) throw badRequest('备份桶未绑定（BACKUPS），无法在导入前自动备份，已取消导入');
     const before = await exportSite(env);
-    if (env.BACKUPS) {
-      const key = `backup/${new Date().toISOString().slice(0, 10)}/pre-import-${nowSec()}.json`;
-      const beforeText = JSON.stringify(before);
+    const key = `backup/${new Date().toISOString().slice(0, 10)}/pre-import-${nowSec()}.json`;
+    const beforeText = JSON.stringify(before);
+    try {
       await env.BACKUPS.put(key, beforeText);
-      await run(env, "INSERT INTO backups (kind, r2_key, size_bytes, post_count, media_count, note, created_at) VALUES ('manual', ?, ?, ?, ?, '导入前自动备份', ?)",
-        key, new TextEncoder().encode(beforeText).length, countOf(before).posts, countOf(before).media, nowSec());
+    } catch (e) {
+      throw badRequest('导入前自动备份写入失败，已取消导入：' + (e?.message || e));
     }
+    await run(env, "INSERT INTO backups (kind, r2_key, size_bytes, post_count, media_count, note, created_at) VALUES ('pre-import', ?, ?, ?, ?, '导入前自动备份', ?)",
+      key, new TextEncoder().encode(beforeText).length, countOf(before).posts, countOf(before).media, nowSec());
     const report = await importSite(env, body.data);
     return json({ report });
   }

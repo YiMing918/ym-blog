@@ -19,6 +19,11 @@ export async function handleRequest(request, env) {
   const url = new URL(request.url);
   const path = url.pathname.replace(/\/+$/, '') || '/';
   const method = request.method.toUpperCase();
+  // /admin（不带斜杠）→ 301 到 /admin/：_routes.json 只排除 /admin/*，
+  // 裸 /admin 会落进函数层 404，而 README 写的后台入口正是 /admin
+  if (path === '/admin') {
+    return new Response(null, { status: 301, headers: { Location: '/admin/' } });
+  }
   try {
     let resp = null;
     resp = await handleFeeds(env, request, method, path);

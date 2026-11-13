@@ -62,9 +62,11 @@ export async function dailyStats(env, days = 30) {
 
 // 内容计数（仪表盘一次拉齐用）
 export async function contentCounts(env) {
-  const one = async (sql) => (await first(env, sql))?.n || 0;
+  const one = async (sql, ...params) => (await first(env, sql, ...params))?.n || 0;
   return {
-    postsPublished: await one("SELECT COUNT(*) AS n FROM posts WHERE status='published'"),
+    // 已发布口径与访客侧统一：含已到点的定时文章（旧版只数 published，
+    // 仪表盘数字长期偏少；2026-11-13 三方审查 B#7）
+    postsPublished: await one("SELECT COUNT(*) AS n FROM posts WHERE status='published' OR (status='scheduled' AND publish_at<=?)", nowSec()),
     postsDraft: await one("SELECT COUNT(*) AS n FROM posts WHERE status='draft'"),
     postsTrash: await one("SELECT COUNT(*) AS n FROM posts WHERE status='trash'"),
     moments: await one("SELECT COUNT(*) AS n FROM moments WHERE status='published'"),

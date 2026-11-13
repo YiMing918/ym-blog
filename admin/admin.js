@@ -513,18 +513,41 @@ function edMarkDirty() {
   ED.dirty = true;
   edLocalSave();
   edSetSaveState('本地已存 ' + new Date().toLocaleTimeString('zh-CN', { hour12: false }) + '（打字中，服务端自动保存稍后跟上）');
-  clearTimeout(ED.serverSaveTimer);
-  ED.serverSaveTimer = setTimeout(edServerAutosave, 60000); // 服务端层每 60 秒节流（与后端约定一致）
+  // 节流而不是防抖：旧版每次输入都 clearTimeout 重置 60 秒，持续打字时
+  // 服务端永远存不上（审查 A#5）。已有待存计时器就不再重置——从第一次
+  // 改动起最多 60 秒必存一次。
+  if (!ED.serverSaveTimer) {
+    ED.serverSaveTimer = setTimeout(edServerAutosave, 60000); // 服务端层每 60 秒节流（与后端约定一致）
+  }
 }
 async function edServerAutosave() {
+  if (ED.serverSaveTimer) { clearTimeout(ED.serverSaveTimer); ED.serverSaveTimer = null; }
   if (!ED.post || !ED.dirty) return;
+  const sent = { title: $('#edTitle').value, content_md: $('#edBody').value };
   try {
-    const r = await api('PUT', `/api/admin/posts/${ED.post.id}/autosave`, {
-      title: $('#edTitle').value, content_md: $('#edBody').value,
-    });
+    const r = await api('PUT', `/api/admin/posts/${ED.post.id}/autosave`, sent);
     edSetSaveState('本地+服务端都已存 ' + new Date(r.saved_at * 1000).toLocaleTimeString('zh-CN', { hour12: false }));
+    // 保存期间没有新改动才清 dirty（否则 beforeunload 会误报/漏报）；
+    // 有新改动则排下一轮节流保存
+    if ($('#edTitle').value === sent.title && $('#edBody').value === sent.content_md) {
+      ED.dirty = false;
+    } else if (!ED.serverSaveTimer) {
+      ED.serverSaveTimer = setTimeout(edServerAutosave, 60000);
+    }
   } catch (e) { edSetSaveState('服务端自动保存失败：' + e.message, true); }
 }
+// 切后台/关页时的最后冲刺保存：keepalive 让请求在页面卸载后也能发完
+// （beforeunload 只弹提醒不保存，旧版切个标签回来草稿就可能丢；审查 A#5）
+function edFlushAutosave() {
+  if (S.view !== 'editor' || !ED.post || !ED.dirty) return;
+  fetch(`/api/admin/posts/${ED.post.id}/autosave`, {
+    method: 'PUT', credentials: 'same-origin', keepalive: true,
+    headers: { 'X-Requested-With': 'fetch', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title: $('#edTitle').value, content_md: $('#edBody').value }),
+  }).catch(() => { /* 卸载期失败无声即可，本地层还留着一份 */ });
+}
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') edFlushAutosave(); });
+window.addEventListener('pagehide', edFlushAutosave);
 function edInsertText(text) {
   const ta = $('#edBody');
   const { selectionStart: s, selectionEnd: e, value } = ta;
@@ -1263,6 +1286,7 @@ const SETTING_GROUPS = [
   ['站点信息', [
     ['site_name', '博客名（Site name）', 'text'],
     ['site_desc', '博客介绍（Description，首页与分享描述用）', 'text'],
+    ['author_nickname', '站长评论昵称（评论区显示名，与登录用户名无关，别填登录名）', 'text'],
     ['hero_title', '首页大标题（Hero title）', 'text'],
     ['hero_text', '首页介绍语（Hero text）', 'textarea'],
     ['avatar_media_id', '头像（媒体 ID，在媒体库里看编号；0=不用）', 'int'],

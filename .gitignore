@@ -1,5 +1,6 @@
 # 本地杂物与密钥，绝不进仓库
-.heartbeat
+# 注意：.heartbeat 不能写进本文件——看门狗靠提交它保活，忽略它会让
+# git add 失败、心跳永远发不出去（2026-11-13 三方审查 B#3，已实测复现）
 __pycache__/
 *.pyc
 node_modules/

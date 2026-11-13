@@ -23,6 +23,15 @@ function slugifyHeading(text, seen) {
 
 function inline(text, ctx) {
   let s = esc(text);
+  // 行内代码先摘出来占位：旧版先处理粗斜体再处理代码，代码里的 ** 会被
+  // 当成粗体标记渲染掉（2026-11-13 三方审查 B 轻微项）。摘出后其内容
+  // 已是 esc 过的，还原时直接包 <code> 即可。
+  const codes = [];
+  s = s.replace(/`([^`]+)`/g, (m, c) => {
+    const marker = `\u0003${codes.length}\u0003`;
+    codes.push(c);
+    return marker;
+  });
   // 图片 ![alt](src)
   s = s.replace(/!\[([^\]]*)\]\(([^)\s]+)(?:\s+&quot;[^&]*&quot;)?\)/g, (m, alt, src) => {
     const marker = `\u0001${ctx.images.length}\u0001`;
@@ -39,20 +48,25 @@ function inline(text, ctx) {
   s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
   s = s.replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<em>$2</em>');
   s = s.replace(/~~([^~]+)~~/g, '<del>$1</del>');
-  s = s.replace(/`([^`]+)`/g, '<code>$1</code>');
   // 还原图片占位
   s = s.replace(/\u0001(\d+)\u0001/g, (m, i) => imageTag(ctx.images[Number(i)]));
+  // 还原行内代码占位
+  s = s.replace(/\u0003(\d+)\u0003/g, (m, i) => `<code>${codes[Number(i)]}</code>`);
   return s;
 }
 
 function imageTag({ alt, src }) {
+  // alt/src 来自 inline() 已整体 esc 过的文本（提取图片语法时就是转义态），
+  // 这里绝不能再 esc 一次——旧版二次转义让带 & 的图片 URL 变成 &amp;amp;
+  // 失效（2026-11-13 三方审查 B#4）。出口还有 sanitizeHtml 做解码+单次
+  // 转义的统一收口，两处配合保证属性值恰好转义一次。
   const long = /\|长图\s*$/.test(alt || '');
   const cleanAlt = (alt || '').replace(/\|长图\s*$/, '');
   if (MEDIA_EXT.test(src)) {
-    return `<video src="${esc(src)}" controls preload="metadata" playsinline></video>`;
+    return `<video src="${src}" controls preload="metadata" playsinline></video>`;
   }
   const cls = long ? ' class="img-long"' : '';
-  return `<img src="${esc(src)}" alt="${esc(cleanAlt)}" loading="lazy"${cls}>`;
+  return `<img src="${src}" alt="${cleanAlt}" loading="lazy"${cls}>`;
 }
 
 function figureFor(images) {
@@ -61,7 +75,8 @@ function figureFor(images) {
     const im = images[0];
     if (MEDIA_EXT.test(im.src)) return `<figure class="fig">${imageTag(im)}</figure>`;
     const long = /\|长图\s*$/.test(im.alt || '');
-    return `<figure class="fig${long ? ' fig-long' : ''}">${imageTag(im)}${im.alt && !long ? `<figcaption>${esc(im.alt.replace(/\|长图\s*$/, ''))}</figcaption>` : ''}</figure>`;
+    // figcaption 里的 alt 同 imageTag：已是转义态，不再二次 esc（B#4）
+    return `<figure class="fig${long ? ' fig-long' : ''}">${imageTag(im)}${im.alt && !long ? `<figcaption>${im.alt.replace(/\|长图\s*$/, '')}</figcaption>` : ''}</figure>`;
   }
   const cls = images.length === 2 ? 'gal gal-2' : images.length === 3 ? 'gal gal-3' : 'gal gal-strip';
   const inner = images.map((im) => imageTag(im)).join('');
@@ -81,9 +96,12 @@ export function renderMarkdown(md) {
   const flushPara = (buf) => {
     if (!buf.length) return;
     const raw = buf.join('\n');
-    // 整段只是视频外链 → 嵌入
-    const vid = parseVideoUrl(raw.trim());
-    if (vid && raw.trim().split('\n').length === 1) { blocks.push(embedHtml(vid)); return; }
+    // 整段只有一个视频外链（整行就是 URL 本身、无其他文字）→ 嵌入。
+    // 旧版只判单行 + parseVideoUrl 的正则不锚定，一行里只要出现视频
+    // 链接，前后文字会被整段吞掉只剩播放器（2026-11-13 三方审查 B#5）。
+    const trimmed = raw.trim();
+    const vid = /^\S+$/.test(trimmed) ? parseVideoUrl(trimmed) : null;
+    if (vid && trimmed.split('\n').length === 1) { blocks.push(embedHtml(vid)); return; }
     // 整段只是 [video](本地文件) → 本地播放器
     const lv = raw.trim().match(/^\[video\]\(([^)]+)\)$/i);
     if (lv) { blocks.push(`<figure class="fig"><video src="${esc(lv[1])}" controls preload="metadata" playsinline></video></figure>`); return; }

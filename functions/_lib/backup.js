@@ -23,7 +23,8 @@ export async function exportSite(env) {
   for (const table of EXPORT_TABLES) {
     let rows = await all(env, `SELECT * FROM ${table}`);
     if (table === 'settings') rows = rows.filter((r) => !SKIP_SETTING_KEYS(r.key) && !SECRET_SETTING_KEYS.has(r.key));
-    if (table === 'admin_users') rows = rows.map(({ password_hash, ...rest }) => ({ ...rest, password_hash })); // 备份需含哈希才能整站恢复；导出接口本身仅站长可用
+    // admin_users 整行导出（含 password_hash）：整站恢复需要它；本导出只走
+    // 站长接口与私有备份桶，公开通道（d1-dump 的 artifact）另有排除名单。
     data.tables[table] = rows;
   }
   return data;
@@ -158,8 +159,30 @@ export async function importSite(env, data) {
     await insertRow('settings', s, ['key', 'value', 'updated_at']);
     report.inserted.settings = (report.inserted.settings || 0) + 1;
   }
-  for (const tg of T.tags || []) { await insertRow('tags', tg, ['id', 'name', 'slug']); report.inserted.tags = (report.inserted.tags || 0) + 1; }
-  for (const m of T.media || []) { await insertRow('media', m, ['id', 'r2_key', 'kind', 'display_name', 'orig_name', 'mime', 'size_bytes', 'width', 'height', 'duration_sec', 'album', 'status', 'ref_count', 'trashed_at', 'created_at']); report.inserted.media = (report.inserted.media || 0) + 1; }
+  // 标签/媒体先建「旧 id → 本站 id」映射，后面所有引用都走映射改写。
+  // 旧版带旧 id INSERT OR IGNORE：id 被现站占用时静默跳过，随后
+  // post_tags.tag_id、文章 cover_media_id、说说 media_id 仍写旧 id，
+  // 会指到现站里不相干的标签/图片上（2026-11-13 三方审查 B#13）。
+  const tagMap = new Map();
+  for (const tg of T.tags || []) {
+    let row = await first(env, 'SELECT id FROM tags WHERE slug = ?', tg.slug);
+    if (!row) {
+      await run(env, 'INSERT OR IGNORE INTO tags (name, slug) VALUES (?, ?)', tg.name, tg.slug);
+      row = await first(env, 'SELECT id FROM tags WHERE slug = ?', tg.slug);
+    }
+    if (row) { tagMap.set(tg.id, row.id); report.inserted.tags = (report.inserted.tags || 0) + 1; }
+  }
+  const mediaMap = new Map();
+  for (const m of T.media || []) {
+    let row = await first(env, 'SELECT id FROM media WHERE r2_key = ?', m.r2_key);
+    if (!row) {
+      const cols = ['r2_key', 'kind', 'display_name', 'orig_name', 'mime', 'size_bytes', 'width', 'height', 'duration_sec', 'album', 'status', 'ref_count', 'trashed_at', 'created_at'];
+      const keys = cols.filter((c) => m[c] !== undefined);
+      const r = await run(env, `INSERT OR IGNORE INTO media (${keys.join(',')}) VALUES (${keys.map(() => '?').join(',')})`, ...keys.map((k) => m[k]));
+      row = r.meta.changes ? { id: r.meta.last_row_id } : await first(env, 'SELECT id FROM media WHERE r2_key = ?', m.r2_key);
+    }
+    if (row) { mediaMap.set(m.id, row.id); report.inserted.media = (report.inserted.media || 0) + 1; }
+  }
   // 文章：slug 冲突 → 改名为 slug-import<ts> 并登记 redirect 指向新文（尽力保旧链可达）
   const idMap = new Map();
   for (const p of T.posts || []) {
@@ -173,6 +196,8 @@ export async function importSite(env, data) {
       report.slugRenamed.push({ from: oldSlug, to: row.slug });
     }
     if (sameId) row.id = undefined; // id 被占但 slug 不同：让其自增新 id
+    // 封面走媒体映射改写（映射里没有就置空，绝不保留旧 id 乱指）
+    row.cover_media_id = row.cover_media_id != null ? (mediaMap.get(row.cover_media_id) ?? null) : null;
     const cols = ['slug', 'type', 'title', 'content_md', 'rendered_html', 'excerpt', 'cover_media_id', 'status', 'publish_at', 'password_hash', 'is_sticky', 'comment_enabled', 'word_count', 'trashed_at', 'created_at', 'updated_at'];
     if (row.id !== undefined) cols.unshift('id');
     await insertRow('posts', row, cols);
@@ -192,21 +217,47 @@ export async function importSite(env, data) {
   }
   for (const pt of T.post_tags || []) {
     const pid = idMap.get(pt.post_id);
-    if (pid) { await insertRow('post_tags', { post_id: pid, tag_id: pt.tag_id }, ['post_id', 'tag_id']); }
+    const tid = tagMap.get(pt.tag_id);
+    if (pid && tid) { await insertRow('post_tags', { post_id: pid, tag_id: tid }, ['post_id', 'tag_id']); }
   }
   for (const r of T.post_revisions || []) {
     const pid = idMap.get(r.post_id);
     if (pid) { await insertRow('post_revisions', { ...r, post_id: pid }, ['post_id', 'title', 'content_md', 'note', 'created_at']); report.inserted.revisions = (report.inserted.revisions || 0) + 1; }
   }
-  for (const mo of T.moments || []) { await insertRow('moments', mo, ['id', 'content', 'media_id', 'status', 'created_at', 'updated_at']); report.inserted.moments = (report.inserted.moments || 0) + 1; }
+  for (const mo of T.moments || []) {
+    const row = { ...mo };
+    delete row.id; // 说说不强塞旧 id，自增新 id；配图走媒体映射
+    row.media_id = mo.media_id != null ? (mediaMap.get(mo.media_id) ?? null) : null;
+    await insertRow('moments', row, ['content', 'media_id', 'status', 'created_at', 'updated_at']);
+    report.inserted.moments = (report.inserted.moments || 0) + 1;
+  }
+  // 评论两遍写：第一遍不带旧 id 插入（parent 先置 0）并记映射，
+  // 第二遍按映射改写 parent_id。旧版不带 id 插入却原样写旧 parent_id，
+  // 回复会挂到现站里不相干的评论上或成孤儿（审查 B#13）。
+  const commentMap = new Map();
+  const pendingParents = [];
   for (const c of T.comments || []) {
     const pid = idMap.get(c.post_id);
-    if (pid) { await insertRow('comments', { ...c, post_id: pid }, ['post_id', 'parent_id', 'author_name', 'author_hash', 'content', 'status', 'is_admin', 'ip_hash', 'ua', 'created_at']); report.inserted.comments = (report.inserted.comments || 0) + 1; }
+    if (!pid) continue;
+    const r = await run(env, 'INSERT INTO comments (post_id, parent_id, author_name, author_hash, content, status, is_admin, ip_hash, ua, created_at) VALUES (?, 0, ?, ?, ?, ?, ?, ?, ?, ?)',
+      pid, c.author_name, c.author_hash ?? null, c.content, c.status, c.is_admin ?? 0, c.ip_hash ?? null, c.ua ?? null, c.created_at);
+    const newId = r.meta.last_row_id;
+    if (newId) {
+      commentMap.set(c.id, newId);
+      if (c.parent_id) pendingParents.push([newId, c.parent_id]);
+      report.inserted.comments = (report.inserted.comments || 0) + 1;
+    }
+  }
+  for (const [newId, oldParent] of pendingParents) {
+    const np = commentMap.get(oldParent);
+    if (np) await run(env, 'UPDATE comments SET parent_id = ? WHERE id = ?', np, newId);
   }
   for (const f of T.friend_links || []) { await insertRow('friend_links', f, ['id', 'name', 'url', 'rss_url', 'avatar_url', 'desc', 'sort_order', 'enabled', 'health', 'fail_streak', 'last_checked_at', 'created_at']); report.inserted.friends = (report.inserted.friends || 0) + 1; }
   for (const v of T.view_stats || []) {
+    const pid = idMap.get(v.post_id);
+    if (!pid) continue; // 旧版查不到映射时回退用旧 post_id，会把浏览数记到不相干的文章上
     await run(env, 'INSERT INTO view_stats (post_id, day, pv) VALUES (?, ?, ?) ON CONFLICT(post_id, day) DO UPDATE SET pv = MAX(pv, excluded.pv)',
-      idMap.get(v.post_id) || v.post_id, v.day, v.pv).catch(() => {});
+      pid, v.day, v.pv).catch(() => {});
   }
   return report;
 }

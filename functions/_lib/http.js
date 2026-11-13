@@ -47,9 +47,11 @@ export async function sha256Hex(text) {
   return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
-// IP 只存哈希，不落明文（salt 可用环境变量 IP_SALT 覆盖）
+// IP 只存哈希，不落明文（salt 可用环境变量 IP_SALT 覆盖）。
+// 没配 IP_SALT 时退回用 PASSWORD_PEPPER（部署必配的真秘密）——旧版默认
+// 盐是写死的公开常量 'ym-blog-ip'，IPv4 空间可穷举反查，等于没盐。
 export async function ipHash(env, request) {
-  return sha256Hex((env.IP_SALT || 'ym-blog-ip') + '|' + clientIp(request));
+  return sha256Hex((env.IP_SALT || env.PASSWORD_PEPPER || 'ym-blog-ip') + '|' + clientIp(request));
 }
 
 export function randomToken(bytes = 32) {

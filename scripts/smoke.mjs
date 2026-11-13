@@ -50,6 +50,7 @@ db.exec(readFileSync(join(root, 'schema/0001_init.sql'), 'utf8'));
 db.exec(readFileSync(join(root, 'schema/0002_seed.sql'), 'utf8'));
 db.exec(readFileSync(join(root, 'schema/0003_fts.sql'), 'utf8'));
 db.exec(readFileSync(join(root, 'schema/0004_media_trash.sql'), 'utf8'));
+db.exec(readFileSync(join(root, 'schema/0005_comment_trash.sql'), 'utf8'));
 
 const env = {
   DB: new D1Shim(db),
@@ -797,6 +798,139 @@ const failed = results.filter((r) => !r.pass);
   resp = await req('GET', '/api/admin/media?status=trashed');
   check('【v1.1.4】强制彻底删除后行与对象都没了',
     !(await resp.json()).data.media.some((m) => m.id === signR.media_id) && !env.MEDIA.map.has(signR.r2_key));
+}
+
+// ---------- 18. 第八批 v1.2.0：三方审查修复（密码文隐私/锁定口径/导入映射/备份口径） ----------
+{
+  const H = { headers: { 'X-Requested-With': 'fetch' } };
+  const ANON_IP = { 'cf-connecting-ip': '198.51.100.23' };
+
+  // 文件级断言
+  const gitignore = readFileSync(join(root, '.gitignore'), 'utf8');
+  check('【v1.2.0】.gitignore 不再忽略 .heartbeat（看门狗心跳可提交）',
+    !gitignore.split('\n').some((l) => l.trim() === '.heartbeat'));
+  const dumpSrc = readFileSync(join(root, 'scripts/d1-dump.mjs'), 'utf8');
+  check('【v1.2.0】d1-dump 带凭据表排除名单（NO_DATA_TABLES）',
+    dumpSrc.includes('NO_DATA_TABLES') && dumpSrc.includes("'recovery_codes'"));
+  const cmtCols = db.prepare('PRAGMA table_info(comments)').all();
+  check('【v1.2.0】冒烟库 comments 表已有 trashed_at 列（0005 已执行）', cmtCols.some((c) => c.name === 'trashed_at'));
+  const tasksSrc2 = readFileSync(join(root, 'functions/_handlers/tasks-api.js'), 'utf8');
+  check('【v1.2.0】备份保留只轮换 auto-weekly（不动 manual/pre-import）', tasksSrc2.includes("kind = 'auto-weekly'"));
+  const adminJsSrc = readFileSync(join(root, 'admin/admin.js'), 'utf8');
+  check('【v1.2.0】编辑器自动保存是节流（不重置计时器）且带切后台冲刺保存',
+    adminJsSrc.includes('if (!ED.serverSaveTimer)') && adminJsSrc.includes('edFlushAutosave'));
+
+  // 密码文章隐私：建一篇带密码的文章并发布
+  resp = await req('POST', '/api/admin/posts', {
+    body: { title: '密码文标题abc', content_md: '正文里有独一无二的机密词xyz，别处没有。', post_password: 'pw-test-123' }, ...H,
+  });
+  const pwPost = (await resp.json()).data?.post;
+  check('【v1.2.0】密码文章创建成功', !!pwPost?.id);
+  resp = await req('POST', `/api/admin/posts/${pwPost.id}/publish`, { body: {}, ...H });
+  check('【v1.2.0】密码文章发布成功', resp.status === 200);
+  const pwRow = db.prepare('SELECT excerpt, password_hash FROM posts WHERE id = ?').get(pwPost.id);
+  check('【v1.2.0】密码文章不存正文摘要（excerpt 为空）', pwRow && pwRow.password_hash && !pwRow.excerpt);
+
+  resp = await req('GET', '/', { useCookie: false, headers: ANON_IP });
+  const homeHtml = await resp.text();
+  check('【v1.2.0】首页只露占位摘要、不露密码文正文', homeHtml.includes('这篇文章设置了密码') && !homeHtml.includes('机密词xyz'));
+
+  resp = await req('GET', '/api/search?q=' + encodeURIComponent('机密词xyz'), { useCookie: false, headers: ANON_IP });
+  const srch = await resp.json();
+  check('【v1.2.0】/api/search 按正文搜不到密码文（无预言机）',
+    resp.status === 200 && !(srch.data?.results || []).some((r) => r.id === pwPost.id));
+  resp = await req('GET', '/api/search?q=' + encodeURIComponent('密码文标题abc'), { useCookie: false, headers: ANON_IP });
+  const srch2 = await resp.json();
+  const hit = (srch2.data?.results || []).find((r) => r.id === pwPost.id);
+  check('【v1.2.0】/api/search 按标题能搜到密码文且摘要是占位',
+    !!hit && hit.excerpt === '这篇文章设置了密码，输入密码后查看。' && !('password_hash' in hit));
+
+  resp = await req('GET', '/rss.xml', { useCookie: false, headers: ANON_IP });
+  const rss = await resp.text();
+  check('【v1.2.0】RSS 里密码文只有占位摘要', rss.includes('这篇文章设置了密码') && !rss.includes('机密词xyz'));
+
+  const pwSlug = db.prepare('SELECT slug FROM posts WHERE id = ?').get(pwPost.id)?.slug;
+  resp = await req('GET', `/post/${pwSlug}`, { useCookie: false, headers: ANON_IP });
+  const unlockHtml = await resp.text();
+  check('【v1.2.0】未解锁文章页是私有缓存头且不露正文',
+    (resp.headers.get('cache-control') || '').includes('private') && !unlockHtml.includes('机密词xyz'));
+
+  // 评论闸门：未解锁读不到、评不了；解锁后可读
+  resp = await req('POST', '/api/admin/comments', { body: { post_id: pwPost.id, content: '站长在密码文下的回复' }, ...H });
+  check('【v1.2.0】站长回复发表成功', resp.status === 200);
+  const cmtRow = db.prepare('SELECT author_name FROM comments WHERE post_id = ? ORDER BY id DESC LIMIT 1').get(pwPost.id);
+  check('【v1.2.0】站长回复显示名是昵称不是登录用户名', cmtRow && cmtRow.author_name !== 'smoke-admin');
+  resp = await req('GET', `/api/comments?post_id=${pwPost.id}`, { useCookie: false, headers: ANON_IP });
+  check('【v1.2.0】未解锁时评论列表接口 404', resp.status === 404);
+  resp = await req('POST', '/api/comments', {
+    body: { post_id: pwPost.id, author_name: '路人', content: '绕过页面直接评论' },
+    useCookie: false, headers: { ...ANON_IP, 'X-Requested-With': 'fetch' },
+  });
+  check('【v1.2.0】未解锁时评论提交被拒（404）', resp.status === 404);
+  resp = await req('POST', `/api/post/${pwPost.id}/unlock`, {
+    body: { password: 'pw-test-123' }, useCookie: false, headers: { ...ANON_IP, 'X-Requested-With': 'fetch' },
+  });
+  const unlockCookie = (resp.headers.get('set-cookie') || '').split(';')[0];
+  check('【v1.2.0】正确密码可解锁并拿到解锁 Cookie', resp.status === 200 && unlockCookie.startsWith(`bk_unlock_${pwPost.id}=`));
+  resp = await req('GET', `/api/comments?post_id=${pwPost.id}`, { useCookie: false, headers: { ...ANON_IP, Cookie: unlockCookie } });
+  const cmtList = await resp.json();
+  check('【v1.2.0】解锁后评论列表可读', resp.status === 200 && (cmtList.data?.comments || []).length >= 1);
+
+  // 私密文评论不可读（老问题：按 post_id 直读）；直改库切状态，断言只针对接口行为
+  db.prepare("UPDATE posts SET status = 'private' WHERE id = ?").run(pwPost.id);
+  resp = await req('GET', `/api/comments?post_id=${pwPost.id}`, { useCookie: false, headers: ANON_IP });
+  check('【v1.2.0】私密文章的评论列表接口 404', resp.status === 404);
+  db.prepare("UPDATE posts SET status = 'published' WHERE id = ?").run(pwPost.id);
+
+  // 导入映射：id 全面碰撞时引用必须改写到新 id
+  const existPost = db.prepare('SELECT id FROM posts ORDER BY id LIMIT 1').get();
+  const existTag = db.prepare('SELECT id FROM tags ORDER BY id LIMIT 1').get();
+  const impData = {
+    app: 'ym-blog', version: 1,
+    tables: {
+      tags: [{ id: existTag.id, name: '导入标签X', slug: 'imp-tag-x' }],
+      media: [{ id: 987001, r2_key: 'media/imp-pic.png', kind: 'image', display_name: '导入图', orig_name: 'imp.png', mime: 'image/png', size_bytes: 10, status: 'ready', created_at: 1700000000 }],
+      posts: [{ id: existPost.id, slug: 'imp-post-x', type: 'post', title: '导入文章X', content_md: '导入正文内容', rendered_html: '', excerpt: '', cover_media_id: 987001, status: 'published', publish_at: 1700000000, password_hash: null, is_sticky: 0, comment_enabled: 1, word_count: 6, trashed_at: null, created_at: 1700000000, updated_at: 1700000000 }],
+      post_tags: [{ post_id: existPost.id, tag_id: existTag.id }],
+      moments: [{ id: 987201, content: '导入说说X', media_id: 987001, status: 'published', created_at: 1700000000, updated_at: 1700000000 }],
+      comments: [
+        { id: 987101, post_id: existPost.id, parent_id: 0, author_name: '父', author_hash: null, content: '导入父评论', status: 'approved', is_admin: 0, ip_hash: null, ua: null, created_at: 1700000001 },
+        { id: 987102, post_id: existPost.id, parent_id: 987101, author_name: '子', author_hash: null, content: '导入子回复', status: 'approved', is_admin: 0, ip_hash: null, ua: null, created_at: 1700000002 },
+      ],
+      view_stats: [{ post_id: existPost.id, day: '2026-01-02', pv: 42 }],
+    },
+  };
+  resp = await req('POST', '/api/admin/import', { body: { confirm: true, data: impData }, ...H });
+  check('【v1.2.0】碰撞型导入执行成功', resp.status === 200, `status=${resp.status}`);
+  const newPost = db.prepare("SELECT * FROM posts WHERE slug = 'imp-post-x'").get();
+  const newMedia = db.prepare("SELECT * FROM media WHERE r2_key = 'media/imp-pic.png'").get();
+  const newTag = db.prepare("SELECT * FROM tags WHERE slug = 'imp-tag-x'").get();
+  check('【v1.2.0】导入文章拿到新 id（没抢占现站文章）', !!newPost && newPost.id !== existPost.id);
+  check('【v1.2.0】导入文章封面改写到新媒体 id', !!newPost && !!newMedia && newPost.cover_media_id === newMedia.id);
+  const pt = newPost && db.prepare('SELECT tag_id FROM post_tags WHERE post_id = ?').get(newPost.id);
+  check('【v1.2.0】导入文章标签改写到新标签 id', !!pt && !!newTag && pt.tag_id === newTag.id && newTag.id !== existTag.id);
+  const parentC = newPost && db.prepare("SELECT * FROM comments WHERE post_id = ? AND content = '导入父评论'").get(newPost.id);
+  const childC = newPost && db.prepare("SELECT * FROM comments WHERE post_id = ? AND content = '导入子回复'").get(newPost.id);
+  check('【v1.2.0】导入评论楼层关系按新 id 重挂', !!parentC && !!childC && childC.parent_id === parentC.id);
+  const vs = newPost && db.prepare("SELECT pv FROM view_stats WHERE post_id = ? AND day = '2026-01-02'").get(newPost.id);
+  check('【v1.2.0】导入浏览数记到新文章名下', !!vs && vs.pv === 42);
+  const mo = db.prepare("SELECT * FROM moments WHERE content = '导入说说X'").get();
+  check('【v1.2.0】导入说说配图改写到新媒体 id', !!mo && !!newMedia && mo.media_id === newMedia.id);
+  const lastBk = db.prepare('SELECT kind FROM backups ORDER BY id DESC LIMIT 1').get();
+  check('【v1.2.0】导入前自动备份登记为 pre-import 类', !!lastBk && lastBk.kind === 'pre-import');
+
+  // 登录锁定按「用户名+IP」：同 IP 连错 5 次锁定，换 IP 不受影响
+  for (let i = 0; i < 5; i++) {
+    resp = await req('POST', '/api/admin/login', { body: { username: 'smoke-admin', password: 'wrong-again-x' }, ...H, useCookie: false });
+  }
+  check('【v1.2.0】同 IP 连错 5 次后第 6 次是计数内拒绝（401 或 429）', resp.status === 401 || resp.status === 429);
+  resp = await req('POST', '/api/admin/login', { body: { username: 'smoke-admin', password: 'wrong-again-x' }, ...H, useCookie: false });
+  check('【v1.2.0】同 IP 继续尝试被锁定（429）', resp.status === 429, `status=${resp.status}`);
+  resp = await req('POST', '/api/admin/login', {
+    body: { username: 'smoke-admin', password: 'wrong-again-x' },
+    headers: { 'X-Requested-With': 'fetch', 'cf-connecting-ip': '203.0.113.77' }, useCookie: false,
+  });
+  check('【v1.2.0】换一个 IP 不被别人的失败锁定（401 非 429）', resp.status === 401, `status=${resp.status}`);
 }
 
 // ---------- 汇总 ----------

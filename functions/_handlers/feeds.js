@@ -5,6 +5,7 @@
 import { all } from '../_lib/db.js';
 import { nowSec, esc } from '../_lib/http.js';
 import { getSettings } from '../_lib/settings.js';
+import { maskExcerpt } from './public-api.js';
 
 let cache = { rssKey: '', rss: '', smKey: '', sitemap: '' };
 
@@ -15,9 +16,17 @@ function baseUrl(request, env) {
 }
 
 async function cacheKey(env) {
-  const rows = await all(env, "SELECT MAX(updated_at) AS m FROM posts WHERE status IN ('published','scheduled')");
+  // 缓存键必须覆盖一切会改变输出的变化：旧版只有 MAX(updated_at)——
+  // 删掉/转私密一篇不是最新的文章时 MAX 不变、缓存照旧命中，删掉的
+  // 文章还挂在 RSS 里；定时文章到点时没有任何字段变化，永远进不了
+  // RSS（2026-11-13 三方审查 B#6）。改为「当前可见文章数 + 可见集合的
+  // MAX(updated_at) + MAX(publish_at) + 设置版本」：可见集合一增一减、
+  // 任一篇改动、定时到点（计数变化）都会换键。
+  const t = nowSec();
+  const rows = await all(env, `SELECT COUNT(*) AS n, MAX(updated_at) AS m, MAX(publish_at) AS mp FROM posts
+    WHERE type='post' AND (status='published' OR (status='scheduled' AND publish_at<=?))`, t);
   const settings = await getSettings(env);
-  return `${rows[0]?.m || 0}:${settings._ver}`;
+  return `${rows[0]?.n || 0}:${rows[0]?.m || 0}:${rows[0]?.mp || 0}:${settings._ver}`;
 }
 
 export async function handleFeeds(env, request, method, path) {
@@ -37,7 +46,7 @@ export async function handleFeeds(env, request, method, path) {
     if (cache.rssKey === key && cache.rss) {
       return new Response(cache.rss, { headers: { 'Content-Type': 'application/rss+xml; charset=utf-8' } });
     }
-    const posts = await all(env, `SELECT slug, title, excerpt, publish_at FROM posts
+    const posts = await all(env, `SELECT slug, title, excerpt, publish_at, password_hash FROM posts
       WHERE type='post' AND (status='published' OR (status='scheduled' AND publish_at<=?))
       ORDER BY publish_at DESC LIMIT 20`, t);
     const items = posts.map((p) => `    <item>
@@ -45,7 +54,7 @@ export async function handleFeeds(env, request, method, path) {
       <link>${base}/post/${encodeURIComponent(p.slug)}</link>
       <guid>${base}/post/${encodeURIComponent(p.slug)}</guid>
       <pubDate>${new Date((p.publish_at || 0) * 1000).toUTCString()}</pubDate>
-      <description>${esc(p.excerpt || '')}</description>
+      <description>${esc(maskExcerpt(p))}</description>
     </item>`).join('\n');
     const rss = `<?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0"><channel>

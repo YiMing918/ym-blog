@@ -13,6 +13,14 @@ import { recordView } from '../_lib/stats.js';
 import { readCookie } from '../_lib/auth.js';
 import { sha256Hex } from '../_lib/http.js';
 
+// 密码文章在一切公开列表/搜索/订阅里只露标题，摘要统一用这句占位——
+// 摘要默认从正文截前 140 字，密码文章原样输出等于直接送正文开头，
+// 搜索还能拿它逐词试探正文（2026-11-13 三方审查 B#1 / A#2）。
+export const PASSWORD_EXCERPT = '这篇文章设置了密码，输入密码后查看。';
+export function maskExcerpt(post) {
+  return post.password_hash ? PASSWORD_EXCERPT : (post.excerpt || '');
+}
+
 // 文章当前是否对访客可见（定时到点靠读时判断）
 export function isPubliclyVisible(post, t = nowSec()) {
   if (!post) return false;
@@ -29,8 +37,11 @@ export async function handlePublicApi(env, request, method, path, url) {
     if (!settings.comments_on) throw forbidden('评论已关闭');
     const body = await readJson(request);
     const postId = Number(body.post_id);
-    const post = await first(env, 'SELECT id, status, publish_at, comment_enabled FROM posts WHERE id = ?', postId);
+    const post = await first(env, 'SELECT id, status, publish_at, comment_enabled, password_hash FROM posts WHERE id = ?', postId);
     if (!isPubliclyVisible(post) || !post.comment_enabled) throw notFound('文章不存在');
+    // 密码文章未解锁不许评论（页面上解锁前本来也看不到评论框，
+    // 接口层必须同口径，否则绕过页面直接调接口即可；审查 A#2）
+    if (post.password_hash && !(await isUnlocked(env, request, post))) throw notFound('文章不存在');
     const name = String(body.author_name || '').trim().slice(0, 30);
     const content = String(body.content || '').trim();
     if (!name) throw badRequest('请填写昵称');
@@ -44,15 +55,19 @@ export async function handlePublicApi(env, request, method, path, url) {
     const rl = await checkLimit(env, settings, 'comment', iph);
     if (!rl.allowed) throw tooMany('评论太频繁，请稍后再试');
     // 状态判定
+    const contactHash = body.contact ? await sha256Hex(String(body.contact).slice(0, 120)) : null;
     let status = 'pending';
     if (hitSpamWord(content) || hitSpamWord(name)) status = 'spam';
     else if (countLinks(content) >= Math.max(1, settings.comments_link_limit)) status = 'pending';
     else {
-      const old = await first(env, "SELECT id FROM comments WHERE ip_hash = ? AND status='approved' LIMIT 1", iph);
+      // 老访客免审：旧版只认 IP 哈希——移动 NAT/校园网/公司出口共用一个
+      // IP 时全员连带免审，先发一条正常评论再批量发垃圾也畅通（审查 B#11）。
+      // 改为 IP + 昵称 + 联系方式哈希三者同时对上才算老访客（联系方式
+      // 不公开显示，只存哈希；没留联系方式时按 NULL 对 NULL 匹配）。
+      const old = await first(env, "SELECT id FROM comments WHERE ip_hash = ? AND author_name = ? AND author_hash IS ? AND status='approved' LIMIT 1", iph, name, contactHash);
       if (old) status = 'approved';                        // 老访客免审
       else if (!settings.comments_moderation) status = 'approved';
     }
-    const contactHash = body.contact ? await sha256Hex(String(body.contact).slice(0, 120)) : null;
     const parentId = Number(body.parent_id) || 0;
     if (parentId) {
       const parent = await first(env, "SELECT id FROM comments WHERE id = ? AND post_id = ? AND status='approved'", parentId, postId);
@@ -70,6 +85,12 @@ export async function handlePublicApi(env, request, method, path, url) {
   if (method === 'GET' && path === '/api/comments') {
     const postId = Number(url.searchParams.get('post_id'));
     if (!postId) throw badRequest('缺少 post_id');
+    // 先查文章可见性：旧版按 post_id 直接出评论，私密/草稿/回收站文章下
+    // 已通过的评论仍能被任何人读到（审查 A#2 / B 轻微项）；密码文章
+    // 还要已解锁才给（与提交侧同口径）。
+    const post = await first(env, 'SELECT id, status, publish_at, password_hash FROM posts WHERE id = ?', postId);
+    if (!isPubliclyVisible(post)) throw notFound('文章不存在');
+    if (post.password_hash && !(await isUnlocked(env, request, post))) throw notFound('文章不存在');
     const rows = await all(env, "SELECT id, parent_id, author_name, content, is_admin, created_at FROM comments WHERE post_id = ? AND status='approved' ORDER BY created_at ASC LIMIT 200", postId);
     return json({ comments: rows.map((c) => ({ ...c, html: renderCommentText(c.content) })) });
   }
@@ -78,7 +99,9 @@ export async function handlePublicApi(env, request, method, path, url) {
   if (method === 'POST' && path === '/api/view') {
     const body = await readJson(request).catch(() => ({}));
     const postId = Number(body.post_id);
-    const viewable = postId ? await first(env, "SELECT id FROM posts WHERE id = ? AND status='published'", postId) : null;
+    // 可见口径与页面统一（旧版只认 published：定时文章到点后阅读数
+    // 永远记不上、热门榜也上不去；审查 B#7）
+    const viewable = postId ? await first(env, "SELECT id FROM posts WHERE id = ? AND (status='published' OR (status='scheduled' AND publish_at<=?))", postId, nowSec()) : null;
     if (postId && viewable) {
       const iph = await ipHash(env, request);
       const rl = await checkLimit(env, settings, 'view', `${iph}:${postId}`);
@@ -118,27 +141,34 @@ export async function handlePublicApi(env, request, method, path, url) {
     // 与页面搜索（pages.js 的 /search）同口径：先走 FTS5 trigram 全文索引（schema/0003），
     // 按相关度排序；退回 LIKE 的三种情况与页面版一致：词太短（<3 字切不出 trigram 片段）、
     // 索引表还没建（迁移未跑，查询抛错）、索引无命中（LIKE 再兜一次保证召回不劣于旧版）。
+    // 密码文章只许按标题命中：正文不参与匹配（防逐词试探的预言机），
+    // 命中后摘要打码（与页面搜索 pages.js /search 同口径；审查 B#1）
     let rows = null;
     const tokens = q.replace(/["*()^]/g, ' ').split(/\s+/).filter((w) => w.length >= 3);
     if (tokens.length) {
       try {
         const match = tokens.map((w) => `"${w}"`).join(' OR ');
-        rows = await all(env, `SELECT p.id, p.slug, p.title, p.excerpt, p.publish_at
+        rows = await all(env, `SELECT p.id, p.slug, p.title, p.excerpt, p.publish_at, p.password_hash
           FROM posts p JOIN posts_fts f ON f.rowid = p.id
-          WHERE posts_fts MATCH ? AND p.type='post'
+          WHERE posts_fts MATCH ? AND p.type='post' AND p.password_hash IS NULL
           AND (p.status='published' OR (p.status='scheduled' AND p.publish_at<=?))
           ORDER BY rank LIMIT 20`, match, t);
       } catch { rows = null; }
     }
     if (!rows || !rows.length) {
       const like = `%${q.replace(/[%_]/g, '')}%`;
-      rows = await all(env, `SELECT id, slug, title, excerpt, publish_at,
+      rows = await all(env, `SELECT id, slug, title, excerpt, publish_at, password_hash,
         CASE WHEN title LIKE ? THEN 0 ELSE 1 END AS rank
         FROM posts WHERE type='post' AND (status='published' OR (status='scheduled' AND publish_at<=?))
-        AND (title LIKE ? OR excerpt LIKE ? OR content_md LIKE ?)
+        AND (title LIKE ? OR (password_hash IS NULL AND (excerpt LIKE ? OR content_md LIKE ?)))
         ORDER BY rank, publish_at DESC LIMIT 20`, like, t, like, like, like);
     }
-    return json({ results: rows });
+    return json({
+      results: rows.map((r) => ({
+        id: r.id, slug: r.slug, title: r.title,
+        excerpt: maskExcerpt(r), publish_at: r.publish_at,
+      })),
+    });
   }
 
   return null;

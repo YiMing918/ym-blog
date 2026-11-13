@@ -1,1 +1,1 @@
-{"description":"融合版个人博客：Cloudflare Pages + Functions + D1 + R2，无构建步骤。本文件仅供本地冒烟测试用（Node 内置模块，零依赖），部署不需要它。","name":"ym-blog","private":true,"scripts":{"smoke":"node --experimental-sqlite scripts/smoke.mjs"},"type":"module","version":"0.1.0"}
+{"description": "融合版个人博客：Cloudflare Pages + Functions + D1 + R2，无构建步骤。本文件仅供本地冒烟测试用（Node 内置模块，零依赖），部署不需要它。", "name": "ym-blog", "private": true, "scripts": {"smoke": "node --experimental-sqlite scripts/smoke.mjs"}, "type": "module", "version": "1.2.0"}

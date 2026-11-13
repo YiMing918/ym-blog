@@ -234,6 +234,16 @@ const PARENT_FIRST = [
   'moments', 'comments', 'friend_links', 'friend_posts', 'view_stats', 'redirects',
 ];
 
+// 只出结构、不出数据的表（2026-11-13 三方审查 B#2）：本产物会进公开仓库的
+// Actions artifact（任何登录 GitHub 的人可下载），凭据与运行态绝不能进。
+// 口径与 backup.js 注释一致并再加 admin_users：通道一的 JSON 备份在私有 R2
+// 桶里、含站长哈希是恢复所需；本通道是公开产物，站长哈希不进——恢复后
+// 库里没有站长，走首次初始化流程重建即可（会话/恢复码等本来就该作废）。
+const NO_DATA_TABLES = new Set([
+  'admin_users', 'sessions', 'recovery_codes', 'login_guards',
+  'rate_limits', 'preview_tokens', 'autosaves', 'backups',
+]);
+
 async function main() {
   const schemaDir = resolveSchemaDir();
   const { files, structure, tables, virtual, counts } = parseSchema(schemaDir);
@@ -256,6 +266,7 @@ async function main() {
   parts.push('-- 结构解析自仓库 schema/ 迁移文件（注释已剥离，语句与迁移一致）；数据经 D1 HTTP API 逐表导出。');
   parts.push('-- 恢复：wrangler d1 execute ym-blog-db --remote --file backup-d1.sql ；文件末尾已含 FTS rebuild，无需再跑 schema/0003。');
   parts.push('-- 注意：settings 表的 ai_api_key（AI 写作密钥）按口径不进任何备份产物，本文件同样剔除；恢复后到后台「站点设置 → AI 写作」重填一次即可。');
+  parts.push('-- 注意：admin_users / sessions / recovery_codes / login_guards / rate_limits / preview_tokens / autosaves / backups 只出结构不出数据（公开产物不带凭据与运行态）；恢复后无站长账号，走首次初始化重建，旧会话与恢复码全部作废属预期。');
   for (const s of structure) parts.push(s + ';');
 
   const assertColSet = (t, cols, keys) => {
@@ -270,6 +281,7 @@ async function main() {
 
   let total = 0;
   for (const t of ordered) {
+    if (NO_DATA_TABLES.has(t)) { console.log(`表 ${t}：只出结构、跳过数据（凭据/运行态不进公开产物）`); continue; }
     const cols = tables.get(t);
     const colList = cols.map((c) => `"${c}"`).join(',');
     // 列集对账探针：SELECT * 才能看见迁移之外的多余列（显式列名 SELECT 看不见）；

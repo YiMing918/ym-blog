@@ -21,7 +21,7 @@ const ALLOWED_ATTRS = {
 };
 const EMBED_HOSTS = ['player.bilibili.com', 'www.youtube.com', 'www.youtube-nocookie.com'];
 
-function safeUrl(url, isEmbed = false) {
+export function safeUrl(url, isEmbed = false) {
   if (!url) return null;
   const u = String(url).trim();
   if (/^(https?:)?\/\//i.test(u) || u.startsWith('/')) {
@@ -61,7 +61,13 @@ export function sanitizeHtml(html) {
       const name = am[1].toLowerCase();
       if (name.startsWith('on')) continue;
       if (!allowed.includes(name)) continue;
-      const val = am[3] ?? am[4] ?? am[5] ?? '';
+      // 属性值先解码一层实体再处理：render.js 的产物里属性值已是转义态
+      // （& 写成 &amp;），旧版在这里直接再 esc 一次，带 & 的链接/图片
+      // URL 全变 &amp;amp; 失效（2026-11-13 三方审查 B#4）。解码后先做
+      // safeUrl 校验（顺带识破实体混淆的 javascript:），输出时只 esc 一次。
+      const val = (am[3] ?? am[4] ?? am[5] ?? '')
+        .replace(/&amp;/g, '&').replace(/&quot;/g, '"').replace(/&#39;|&apos;/g, "'")
+        .replace(/&lt;/g, '<').replace(/&gt;/g, '>');
       if (name === 'href' || name === 'src' || name === 'poster') {
         const ok = safeUrl(val, srcCheck && name === 'src');
         if (!ok) continue;
