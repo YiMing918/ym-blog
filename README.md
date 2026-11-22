@@ -4,7 +4,7 @@
 
 ![版本](https://img.shields.io/badge/版本-v1.2.8-blue) ![Cloudflare Pages](https://img.shields.io/badge/Cloudflare-Pages%20%2B%20Functions-f38020) ![D1](https://img.shields.io/badge/数据库-D1-blue) ![R2](https://img.shields.io/badge/存储-R2-9cf) ![License](https://img.shields.io/badge/license-MIT-green) ![Price](https://img.shields.io/badge/运行成本-免费额度内-brightgreen)
 
-**[下载最新版](https://github.com/YiMing918/ym-blog/releases/latest) · [博客教程](https://bk.ymaym.top/post/ym-blog-guide)**
+**[下载最新版](https://github.com/YiMing918/ym-blog/releases/latest) · [博客教程](https://bk.ymaym.top/post/ym-blog-guide) · [视频教程（YouTube）](https://youtu.be/2qfl1gBppKE)**
 
 > **这版是怎么来的**：把几条成熟路线的长处缝在了一起——动态博客（WordPress/Typecho 那类）的防丢稿、回收站、版本回滚；新兴 CF 原生博客的边缘架构与友链探活；静态博客的轻快与耐用；再补上自研的账密登录、恢复码、看门狗与一键逃生导出。设计细节与取舍都在 [MAINTENANCE.md](MAINTENANCE.md) 与仓库内的设计说明里。
 
