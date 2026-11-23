@@ -2,7 +2,7 @@
 
 一个**带完整网页后台的真·动态博客**，全部跑在 Cloudflare 免费额度里：不用租服务器、不用数据库主机、不用备案。手机、平板、电脑打开后台就能写文章、传图、传视频、改站名和颜色，像用 App 一样点点点。适合个人小站，也按通用产品标准做了额度保护与防刷——别人拿去部署、人多了同样扛得住。
 
-![版本](https://img.shields.io/badge/版本-v1.2.8-blue) ![Cloudflare Pages](https://img.shields.io/badge/Cloudflare-Pages%20%2B%20Functions-f38020) ![D1](https://img.shields.io/badge/数据库-D1-blue) ![R2](https://img.shields.io/badge/存储-R2-9cf) ![License](https://img.shields.io/badge/license-MIT-green) ![Price](https://img.shields.io/badge/运行成本-免费额度内-brightgreen)
+![版本](https://img.shields.io/badge/版本-v1.2.9-blue) ![Cloudflare Pages](https://img.shields.io/badge/Cloudflare-Pages%20%2B%20Functions-f38020) ![D1](https://img.shields.io/badge/数据库-D1-blue) ![R2](https://img.shields.io/badge/存储-R2-9cf) ![License](https://img.shields.io/badge/license-MIT-green) ![Price](https://img.shields.io/badge/运行成本-免费额度内-brightgreen)
 
 **[下载最新版](https://github.com/YiMing918/ym-blog/releases/latest) · [博客教程](https://bk.ymaym.top/post/ym-blog-guide) · [视频教程（YouTube）](https://youtu.be/2qfl1gBppKE)**
 
@@ -917,6 +917,12 @@ A：后台文章列表里删除即可（进回收站，30 天内可还原）；�
 - 新增「全程要碰到的钥匙和编号」逐样五点说明（管理员密码、恢复码、备份加密口令、密码胡椒、任务密钥、R2 凭据、两枚令牌、两个 ID、人机验证密钥）；配置表的 GitHub Secrets 清单补上 `BACKUP_PASSPHRASE`（共 13 项）。
 - 新增探活、保活、自动更新与自动任务全表、备份与恢复手把手（含通道二加密包的下载、openssl 解密与整库导入步骤）；原有功能清单、配置表、FAQ、隐私说明、已知边界、版本历史与 Fork 说明全部保留。
 
+
+### v1.2.9（2026-11-23）· 全量审计补漏：清理任务的媒体引用检查改 instr
+
+- **清理任务查引用还在用老写法**：v1.2.8 把后台删图的引用检查改成 instr 时漏了一处——定时清理（purge）真删到期媒体前复查「这张图还在被文章用吗」用的仍是正文 LIKE 模糊找，长文章下 D1 同样会报「LIKE 模式太复杂」：轻则整个清理任务中途报错（后面的会话/令牌/限流清理跟着饿死），重则查不到引用把在用图真删。改成与 v1.2.8 三处一致的 instr 精确查找。
+- **清理计数报实数**：purge 回报的「清掉多少个没传完的媒体登记」此前按待清总数报，删存储对象失败、本应保留重试的行也被算成已删；改成按实际删成功的条数报。
+- 验证：冒烟测试 233/233、友链 SSRF 测试 8/8 全过。
 
 ### v1.2.8（2026-11-22）· 修媒体删除必报错
 
