@@ -129,7 +129,7 @@ export async function handleTasksApi(env, request, method, path) {
     } catch { deadMedia = []; /* 未跑 0004 迁移时无 trashed_at 列：跳过媒体真删，绝不误判到期（中7） */ }
     let mediaDeleted = 0;
     for (const m of deadMedia) {
-      const used = await first(env, "SELECT id FROM posts WHERE status != 'trash' AND content_md LIKE ? LIMIT 1", `%${m.r2_key}%`)
+      const used = await first(env, "SELECT id FROM posts WHERE status != 'trash' AND instr(content_md, ?) > 0 LIMIT 1", m.r2_key)
         || await first(env, "SELECT id FROM posts WHERE status != 'trash' AND cover_media_id = ? LIMIT 1", m.id)
         || await first(env, "SELECT id FROM moments WHERE status != 'trash' AND media_id = ? LIMIT 1", m.id)
         || (Number(settings.avatar_media_id || 0) === Number(m.id) ? { id: m.id } : null);
@@ -141,11 +141,13 @@ export async function handleTasksApi(env, request, method, path) {
     result.media = mediaDeleted;
     // 超 24 小时未完成登记的 pending 媒体行（签了没传的垃圾行）
     const stalePending = await all(env, "SELECT * FROM media WHERE status='pending' AND created_at < ?", t - 86400);
+    let pendingDeleted = 0;
     for (const m of stalePending) {
       if (env.MEDIA) { try { await env.MEDIA.delete(m.r2_key); } catch { continue; /* 同中9：失败保留行 */ } }
       await run(env, 'DELETE FROM media WHERE id = ?', m.id);
+      pendingDeleted++;
     }
-    result.pending_media = stalePending.length;
+    result.pending_media = pendingDeleted;
     await run(env, 'DELETE FROM sessions WHERE expires_at < ?', t);
     await run(env, 'DELETE FROM preview_tokens WHERE expires_at < ? OR revoked = 1', t);
     await run(env, 'DELETE FROM rate_limits WHERE window_start < ?', t - 90 * 86400);
