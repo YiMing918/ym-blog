@@ -377,6 +377,10 @@ export async function handleAdminApi(env, request, method, path, url) {
     if (album) { conds.push('album = ?'); params.push(album); }
     if (q) { conds.push('(display_name LIKE ? OR orig_name LIKE ?)'); params.push(`%${q}%`, `%${q}%`); }
     const rows = await all(env, `SELECT * FROM media WHERE ${conds.join(' AND ')} ORDER BY created_at DESC LIMIT ? OFFSET ?`, ...params, per, (page - 1) * per);
+    // 列表里显示的“被引用数”要当场重算：ref_count 只在删文件时才刷新，
+    // 上传/发文/换封面后存量值还是 0，列表会一直显示“被 0 篇引用”。
+    // 只算当前这一页（30 条），不扫全库。
+    for (const m of rows) m.ref_count = await recountMediaRef(env, m);
     return json({ media: rows.map((m) => ({ ...m, url: publicMediaUrl(env, m.r2_key) })), usage: await mediaUsage(env), page, per });
   }
 
