@@ -61,7 +61,7 @@ jobs:
       D1_DATABASE_ID: ${{ secrets.D1_DATABASE_ID }}
       BACKUP_PASSPHRASE: ${{ secrets.BACKUP_PASSPHRASE }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: 整库 SQL 导出（逐表导出，绕过 FTS5 虚拟表限制）
         if: ${{ env.D1_EXPORT_TOKEN != '' && env.CLOUDFLARE_ACCOUNT_ID != '' && env.D1_DATABASE_ID != '' }}
         run: |
@@ -80,7 +80,7 @@ jobs:
           ls -la backup-d1.sql.enc
       - name: 上传加密产物（保留 90 天）
         if: ${{ env.D1_EXPORT_TOKEN != '' && env.CLOUDFLARE_ACCOUNT_ID != '' && env.D1_DATABASE_ID != '' && env.BACKUP_PASSPHRASE != '' }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: d1-export
           path: backup-d1.sql.enc
