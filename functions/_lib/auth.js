@@ -56,8 +56,12 @@ export async function getSessionUser(env, request) {
 export async function requireAdmin(env, request) {
   const user = await getSessionUser(env, request);
   if (!user) throw unauthorized();
-  // role 校验（中1）：role 是预留字段，只认 owner/admin，其余一律不当站长
-  if (user.role && !['owner', 'admin'].includes(user.role)) {
+  // role 校验（中1）：role 是预留字段，只认 owner/admin，其余一律不当站长。
+  // 改成失败即关（fail-closed）：旧写法带 user.role && 前置，role 为空时
+  // 会直接放行——本站 schema 里 role 是 NOT NULL DEFAULT 'owner'、所有
+  // 建号路径都不写 role（走默认 owner），线上不存在空 role，所以收紧
+  // 不影响任何真实账号，只是把门禁从「靠 schema 兜底」改成「代码本身关死」。
+  if (!['owner', 'admin'].includes(user.role)) {
     throw new HttpError('forbidden', '账号角色无权访问后台', 403);
   }
   return user;
