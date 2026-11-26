@@ -8,9 +8,14 @@ on:
     - cron: '17 19 * * *'   # UTC 19:17 ≈ 北京时间次日 03:17（凌晨低峰）
   workflow_dispatch:
 
+concurrency:
+  group: purge
+  cancel-in-progress: false
+
 jobs:
   purge:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: 调清理任务
         env:
@@ -20,4 +25,4 @@ jobs:
           if [ -z "$SITE_URL" ] || [ -z "$TASK_SECRET" ]; then
             echo "未配置 SITE_URL / TASK_SECRET，跳过。"; exit 0
           fi
-          curl -fsS -X POST "$SITE_URL/api/tasks/purge" -H "X-Task-Secret: $TASK_SECRET" -H "Content-Type: application/json" -d '{}'
+          curl -fsS --max-time 120 --connect-timeout 10 --retry 2 --retry-delay 15 -X POST "$SITE_URL/api/tasks/purge" -H "X-Task-Secret: $TASK_SECRET" -H "Content-Type: application/json" -d '{}'
