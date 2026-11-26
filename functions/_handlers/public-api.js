@@ -5,7 +5,7 @@
 import { first, all, run } from '../_lib/db.js';
 import { json, readJson, nowSec, ipHash, badRequest, notFound, tooMany, forbidden, HttpError } from '../_lib/http.js';
 import { getSettings } from '../_lib/settings.js';
-import { checkLimit } from '../_lib/ratelimit.js';
+import { checkLimit, hitLimit, peekLimit, limitSpec } from '../_lib/ratelimit.js';
 import { verifyTurnstile } from '../_lib/turnstile.js';
 import { renderCommentText, countLinks, hitSpamWord } from '../_lib/sanitize.js';
 import { verifyPassword, hashSecret } from '../_lib/hash.js';
@@ -115,13 +115,21 @@ export async function handlePublicApi(env, request, method, path, url) {
   if (method === 'POST' && unlockMatch) {
     const postId = Number(unlockMatch[1]);
     const iph = await ipHash(env, request);
-    const rl = await checkLimit(env, settings, 'unlock', iph);
-    if (!rl.allowed) throw tooMany('尝试次数过多，请 15 分钟后再试');
+    // 只数失败不数成功（与登录 loginIp 同口径，复审 S1）：旧版 checkLimit 在
+    // 验密码之前就计数、成功解锁也占额度，正常读者连开 5 篇密码文就会被锁
+    // 15 分钟（NAT 共用出口更明显）。改成先 peek 存量、失败后才 hit——防
+    // 爆破的口径不变（猜错 5 次照样锁），成功解锁不再误伤。
+    const unlockSpec = limitSpec(settings, 'unlock');
+    const unlockBucket = `unlock:${iph}`;
+    if (unlockSpec && (await peekLimit(env, unlockBucket, unlockSpec.windowSec)) >= unlockSpec.limit) throw tooMany('尝试次数过多，请 15 分钟后再试');
     const post = await first(env, 'SELECT id, password_hash FROM posts WHERE id = ?', postId);
     if (!post || !post.password_hash) throw notFound('文章不存在');
     const body = await readJson(request);
     const ok = await verifyPassword(env, String(body.password || ''), post.password_hash);
-    if (!ok) throw new HttpError('invalid', '密码错误', 401);
+    if (!ok) {
+      if (unlockSpec) await hitLimit(env, unlockBucket, 100000, unlockSpec.windowSec);
+      throw new HttpError('invalid', '密码错误', 401);
+    }
     // 令牌 = hashSecret(文章号 + 当前密码哈希 + 时间窗)：hashSecret 以服务端
     // 秘密 PASSWORD_PEPPER 为材料（部署必配、永不入库/不进仓库），不知道
     // 秘密的人拿到 password_hash 也算不出令牌；时间窗 24 小时一格、校验认
