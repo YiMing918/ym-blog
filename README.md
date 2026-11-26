@@ -2,7 +2,7 @@
 
 一个**带完整网页后台的真·动态博客**，全部跑在 Cloudflare 免费额度里：不用租服务器、不用数据库主机、不用备案。手机、平板、电脑打开后台就能写文章、传图、传视频、改站名和颜色，像用 App 一样点点点。适合个人小站，也按通用产品标准做了额度保护与防刷——别人拿去部署、人多了同样扛得住。
 
-![版本](https://img.shields.io/badge/版本-v1.2.9-blue) ![Cloudflare Pages](https://img.shields.io/badge/Cloudflare-Pages%20%2B%20Functions-f38020) ![D1](https://img.shields.io/badge/数据库-D1-blue) ![R2](https://img.shields.io/badge/存储-R2-9cf) ![License](https://img.shields.io/badge/license-MIT-green) ![Price](https://img.shields.io/badge/运行成本-免费额度内-brightgreen)
+![版本](https://img.shields.io/badge/版本-v1.2.10-blue) ![Cloudflare Pages](https://img.shields.io/badge/Cloudflare-Pages%20%2B%20Functions-f38020) ![D1](https://img.shields.io/badge/数据库-D1-blue) ![R2](https://img.shields.io/badge/存储-R2-9cf) ![License](https://img.shields.io/badge/license-MIT-green) ![Price](https://img.shields.io/badge/运行成本-免费额度内-brightgreen)
 
 **[下载最新版](https://github.com/YiMing918/ym-blog/releases/latest) · [博客教程](https://bk.ymaym.top/post/ym-blog-guide) · [视频教程（YouTube）](https://youtu.be/2qfl1gBppKE)**
 
@@ -917,6 +917,14 @@ A：后台文章列表里删除即可（进回收站，30 天内可还原）；�
 - 新增「全程要碰到的钥匙和编号」逐样五点说明（管理员密码、恢复码、备份加密口令、密码胡椒、任务密钥、R2 凭据、两枚令牌、两个 ID、人机验证密钥）；配置表的 GitHub Secrets 清单补上 `BACKUP_PASSPHRASE`（共 13 项）。
 - 新增探活、保活、自动更新与自动任务全表、备份与恢复手把手（含通道二加密包的下载、openssl 解密与整库导入步骤）；原有功能清单、配置表、FAQ、隐私说明、已知边界、版本历史与 Fork 说明全部保留。
 
+
+### v1.2.10（2026-11-26）· 全量复审 5 个疑似项逐条核实后修
+
+- **解锁限流只数失败（S1）**：文章密码解锁以前在验密码之前就计数、输对了也占额度，正常读者连开 5 篇密码文就被锁 15 分钟。改成与登录同口径——先看存量、只给猜错计数；防爆破不变（猜错 5 次照样锁），成功解锁不再误伤。
+- **自动封面精确匹配（S2）**：正文首图自动设封面以前只拿文件名做模糊匹配，外站图片和自家文件同名时会误认。现在按完整存储键精确查，只有自家媒体才会被认成封面。
+- **退出登录补 CSRF 校验（S3）**：与本站其他写接口同口径，前端本来就带这个头，无感知。
+- **响应体上限补实（S4）**：安全抓取以前只看对方声明的长度，没声明长度的分块响应能绕过上限。现在读取时逐块累计字节、超限立即断开，AI 接口的大响应同样受这道闸管。
+- **防猜账号的假哈希换同轨（S5）**：登录时账号不存在也会跑一次假校验防靠快慢猜账号，假哈希以前是旧算法、与真实账号耗时不等价；换成与真实账号相同的主轨算法与参数，快慢不再露馅。
 
 ### v1.2.9（2026-11-23）· 全量审计补漏：清理任务的媒体引用检查改 instr
 
