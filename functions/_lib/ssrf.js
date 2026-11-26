@@ -239,7 +239,27 @@ export async function safeFetch(input, init = {}, opts = {}) {
         }
       }
       const location = res.headers && typeof res.headers.get === 'function' ? res.headers.get('Location') : null;
-      if (!REDIRECT_STATUSES.has(res.status) || !location) return res;
+      if (!REDIRECT_STATUSES.has(res.status) || !location) {
+        // 响应体上限补实（复审 S4）：上面的 Content-Length 检查只拦「声明
+        // 长度型」响应，chunked 响应没这个头就绕过去了。给最终响应的 body
+        // 套一层计数流，读的过程中累计字节、超限即报错断开——调用方用
+        // text()/json()/arrayBuffer() 读到一半就会抛 too_large。
+        if (opts.maxResponseBytes && res.body && typeof res.body.pipeThrough === 'function') {
+          const maxB = opts.maxResponseBytes;
+          let seen = 0;
+          const cap = new TransformStream({
+            transform(chunk, controller) {
+              seen += chunk && chunk.byteLength ? chunk.byteLength : 0;
+              if (seen > maxB) { controller.error(new SsrfError('too_large', 'response too large (streamed)')); return; }
+              controller.enqueue(chunk);
+            },
+          });
+          try {
+            return new Response(res.body.pipeThrough(cap), { status: res.status, statusText: res.statusText, headers: res.headers });
+          } catch { return res; }
+        }
+        return res;
+      }
       if (hop >= maxRedirects) {
         try { if (res.body) await res.body.cancel(); } catch { /* ignore */ }
         throw new SsrfError('too_many_redirects', 'more than ' + maxRedirects + ' redirects', res.status);
