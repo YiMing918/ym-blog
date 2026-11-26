@@ -81,8 +81,12 @@ async function applyPostWrite(env, post, body, { isNew = false } = {}) {
     : (willPassword ? '' : excerptOf(md, rendered.text));
   let coverId = body.cover_media_id !== undefined ? (Number(body.cover_media_id) || null) : post.cover_media_id;
   if (!coverId && firstImageOf(md)) {
+    // 自家媒体的键恰是 4 段（img/2026/11/<uuid>.jpg，见 r2sign.newObjectKey），
+    // 正文里的自家图 URL 以完整键结尾——按完整键精确等值查（复审 S2）。
+    // 旧版只拿最后一段文件名做 LIKE %name% 模糊匹配：外站图与自家文件同名
+    // 时会误认成封面。外站 URL 的尾 4 段不可能等于自家键格式，天然落空。
     const key = firstImageOf(md).split('/').slice(-4).join('/');
-    const m = await first(env, 'SELECT id FROM media WHERE r2_key LIKE ?', `%${key.split('/').slice(-1)[0]}`);
+    const m = await first(env, 'SELECT id FROM media WHERE r2_key = ?', key);
     if (m) coverId = m.id;
   }
   let passwordHash = post.password_hash;
