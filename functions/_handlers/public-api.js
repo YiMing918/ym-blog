@@ -58,7 +58,7 @@ export async function handlePublicApi(env, request, method, path, url) {
     const contactHash = body.contact ? await sha256Hex(String(body.contact).slice(0, 120)) : null;
     let status = 'pending';
     if (hitSpamWord(content) || hitSpamWord(name)) status = 'spam';
-    else if (countLinks(content) >= Math.max(1, settings.comments_link_limit)) status = 'pending';
+    else if (settings.comments_link_limit > 0 && countLinks(content) >= settings.comments_link_limit) status = 'pending'; // 0 = 不按链接审（后台文案口径）；旧写法 Math.max(1, …) 让 0 档变成「≥1 条就审」的假开关
     else {
       // 老访客免审：旧版只认 IP 哈希——移动 NAT/校园网/公司出口共用一个
       // IP 时全员连带免审，先发一条正常评论再批量发垃圾也畅通（审查 B#11）。
