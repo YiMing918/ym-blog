@@ -35,9 +35,14 @@ on:
     - cron: '41 20 * * 0'   # UTC 周日 20:41 ≈ 北京时间周一 04:41
   workflow_dispatch:
 
+concurrency:
+  group: backup
+  cancel-in-progress: false
+
 jobs:
   backup-api:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: 调站内备份任务（通道一）
         env:
@@ -49,12 +54,13 @@ jobs:
           fi
           # 备份接口幂等：偶发 500（如边缘/库瞬时繁忙）自动重试，重复触发只多一份
           # 登记、保留期会自动收敛，不产生脏数据。
-          curl -fsS --retry 3 --retry-delay 15 --retry-all-errors -X POST "$SITE_URL/api/tasks/backup" -H "X-Task-Secret: $TASK_SECRET" -H "Content-Type: application/json" -d '{}'
+          curl -fsS --max-time 120 --connect-timeout 10 --retry 3 --retry-delay 15 --retry-all-errors -X POST "$SITE_URL/api/tasks/backup" -H "X-Task-Secret: $TASK_SECRET" -H "Content-Type: application/json" -d '{}'
 
   backup-d1-export:
     needs: backup-api
     if: ${{ always() }}
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     env:
       D1_EXPORT_TOKEN: ${{ secrets.D1_EXPORT_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
