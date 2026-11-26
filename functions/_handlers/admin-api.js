@@ -89,7 +89,9 @@ async function applyPostWrite(env, post, body, { isNew = false } = {}) {
   if (body.post_password !== undefined) {
     passwordHash = body.post_password ? await hashPassword(env, String(body.post_password)) : null;
   }
-  const status = body.status || post.status;
+  // 状态白名单（publish 路径有、普通 PUT 漏了）：任意字符串写进库会让
+  // 内容从访客侧和后台各状态页签一起消失；非法值回落原状态，不整单拒绝
+  const status = ['draft', 'scheduled', 'published', 'private', 'trash'].includes(body.status) ? body.status : post.status;
   let publishAt = body.publish_at !== undefined ? (Number(body.publish_at) || null)
     : (status === 'scheduled' ? post.publish_at : (status === 'published' && !post.publish_at ? t : post.publish_at));
   // 定时改立即发布时把未来时间钳到现在：否则「已发布」的文章日期还在
@@ -338,6 +340,11 @@ export async function handleAdminApi(env, request, method, path, url) {
     const body = await readJson(request);
     const row = await first(env, 'SELECT * FROM media WHERE id = ?', Number(body.media_id));
     if (!row) throw notFound('媒体记录不存在');
+    // 状态校验：已进回收站的媒体不能被迟到的 complete「复活」——旧版无条件
+    // 改回 ready 还不清 trashed_at，留下自相矛盾的行；ready 的重复 complete
+    // 幂等放行，但落库时一并清 trashed_at 保持状态自洽
+    if (row.status === 'trashed') throw badRequest('该媒体已在回收站，不能完成上传');
+    if (row.status !== 'pending' && row.status !== 'ready') throw badRequest('媒体状态异常：' + row.status);
     if (!env.MEDIA) throw badRequest('媒体桶未绑定');
     const head = await env.MEDIA.head(row.r2_key);
     if (!head) throw badRequest('对象还不存在：上传可能未完成，请重试');
@@ -349,7 +356,7 @@ export async function handleAdminApi(env, request, method, path, url) {
     }
     // 合理范围夹取（低4）：宽高/时长只收有限正数并封顶，防脏值入库
     const clampDim = (v, max) => { const n = Number(v); return Number.isFinite(n) && n > 0 ? Math.min(Math.round(n), max) : null; };
-    await run(env, 'UPDATE media SET status=?, width=?, height=?, duration_sec=? WHERE id = ?',
+    await run(env, 'UPDATE media SET status=?, width=?, height=?, duration_sec=?, trashed_at=NULL WHERE id = ?',
       'ready', clampDim(body.width, 20000), clampDim(body.height, 20000), clampDim(body.duration_sec, 86400), row.id);
     return json({ media_id: row.id, media_url: publicMediaUrl(env, row.r2_key) });
   }
@@ -543,14 +550,19 @@ export async function handleAdminApi(env, request, method, path, url) {
   const moMatch = path.match(/^\/api\/admin\/moments\/(\d+)$/);
   if (method === 'PUT' && moMatch) {
     const body = await readJson(request);
+    const mo = await first(env, 'SELECT id FROM moments WHERE id = ?', Number(moMatch[1]));
+    if (!mo) throw notFound('说说不存在');
+    // 状态白名单（与文章 PUT 同口径）：非法状态会让说说从各列表消失
+    const moStatus = ['published', 'draft', 'trash'].includes(body.status) ? body.status : 'published';
     await run(env, 'UPDATE moments SET content = ?, status = ?, updated_at = ? WHERE id = ?',
-      String(body.content || '').slice(0, 1000), body.status || 'published', nowSec(), Number(moMatch[1]));
+      String(body.content || '').slice(0, 1000), moStatus, nowSec(), Number(moMatch[1]));
     return json({ ok: true });
   }
   if (method === 'DELETE' && moMatch) {
     // 进回收站时刷新 updated_at：定时清理按 updated_at 算 30 天保留期，
     // 不刷新的话「很久没编辑、刚删」的说说会被立刻真删（2026-11-09 审校修正）
-    await run(env, "UPDATE moments SET status='trash', updated_at = ? WHERE id = ?", nowSec(), Number(moMatch[1]));
+    const r = await run(env, "UPDATE moments SET status='trash', updated_at = ? WHERE id = ?", nowSec(), Number(moMatch[1]));
+    if (!r.meta.changes) throw notFound('说说不存在');
     return json({ ok: true });
   }
 
@@ -578,13 +590,19 @@ export async function handleAdminApi(env, request, method, path, url) {
   const frMatch = path.match(/^\/api\/admin\/friends\/(\d+)(\/check)?$/);
   if (frMatch && method === 'PUT') {
     const body = await readJson(request);
+    // 与 POST 对齐的必填/存在性校验：旧版空 url 直达 NOT NULL 约束变 500，
+    // 不存在的 id 也回 ok，前端误以为改成功
+    if (!body.name || !body.url) throw badRequest('名称与链接必填');
+    const fr = await first(env, 'SELECT id FROM friend_links WHERE id = ?', Number(frMatch[1]));
+    if (!fr) throw notFound('友链不存在');
     await run(env, 'UPDATE friend_links SET name=?, url=?, rss_url=?, avatar_url=?, desc=?, sort_order=?, enabled=? WHERE id=?',
       String(body.name || '').slice(0, 60), checkFriendUrl(body.url, '链接'), checkFriendUrl(body.rss_url, 'RSS 地址'), checkFriendUrl(body.avatar_url, '头像地址'),
       String(body.desc || '').slice(0, 200), Number(body.sort_order) || 0, body.enabled === false ? 0 : 1, Number(frMatch[1]));
     return json({ ok: true });
   }
   if (frMatch && method === 'DELETE') {
-    await run(env, 'DELETE FROM friend_links WHERE id = ?', Number(frMatch[1]));
+    const r = await run(env, 'DELETE FROM friend_links WHERE id = ?', Number(frMatch[1]));
+    if (!r.meta.changes) throw notFound('友链不存在');
     return json({ ok: true });
   }
   if (frMatch && method === 'POST' && frMatch[2] === '/check') {
