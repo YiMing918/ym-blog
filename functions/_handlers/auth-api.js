@@ -23,7 +23,10 @@ async function safeEqStr(a, b) {
 }
 import { hitLimit, peekLimit, checkLimit, limitSpec } from '../_lib/ratelimit.js';
 // 登录时序兜底（低1）：用户不存在时也跑一次等价校验，避免响应快慢暴露账号是否存在
-const DUMMY_HASH = 'pbkdf2$100000$' + Buffer.from('ym-blog-dummy-salt').toString('base64') + '$' + Buffer.from('ym-blog-dummy-hash-value-32byt').toString('base64');
+// 假哈希与真实账号同走主轨 scrypt（复审 S5）：旧版是 pbkdf2 格式，与多为
+// scrypt 的真实记录耗时不等价，仍可能靠快慢猜账号是否存在。盐 16 字节、
+// 键 32 字节、参数与 hash.js 的 SCRYPT 一致，校验必然算满一遍 scrypt。
+const DUMMY_HASH = 'scrypt$16384,8,1$' + Buffer.from('ym-blog-dummy-sa').toString('base64') + '$' + Buffer.from('ym-blog-dummy-hash-value-32bytes').toString('base64');
 import { getSettings } from '../_lib/settings.js';
 
 function checkPasswordStrength(pw) {
@@ -108,6 +111,7 @@ export async function handleAuthApi(env, request, method, path) {
   }
 
   if (method === 'POST' && path === '/api/admin/logout') {
+    requireCsrf(request); // 与本站其他写接口同口径（复审 S3；前端 api() 本来就带该头）
     await revokeSession(env, request);
     return json({ ok: true }, 200, { 'Set-Cookie': clearCookieHeader() });
   }
