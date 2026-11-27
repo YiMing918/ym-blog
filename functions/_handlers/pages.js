@@ -134,11 +134,12 @@ export async function handlePages(env, request, method, path, url) {
 
   // ---------- 首页 ----------
   if (path === '/') {
-    const page = Math.max(1, Number(url.searchParams.get('page')) || 1);
     const per = settings.posts_per_page || 10;
+    const total = (await first(env, `SELECT COUNT(*) AS n FROM posts WHERE type='post' AND ${pubCond}`, t))?.n || 0;
+    // 页码越界钳到最后一页：?page=99 不再显示空列表 + 假页码（2026-11-27 全量实测）
+    const page = Math.min(Math.max(1, Number(url.searchParams.get('page')) || 1), Math.max(1, Math.ceil(total / per)));
     const posts = await all(env, `SELECT * FROM posts WHERE type='post' AND ${pubCond}
       ORDER BY is_sticky DESC, publish_at DESC LIMIT ? OFFSET ?`, t, per, (page - 1) * per);
-    const total = (await first(env, `SELECT COUNT(*) AS n FROM posts WHERE type='post' AND ${pubCond}`, t))?.n || 0;
     const cards = [];
     for (const p of posts) cards.push(postListItem(p, await coverUrlOf(env, p), settings));
     const moments = await all(env, "SELECT * FROM moments WHERE status='published' ORDER BY created_at DESC LIMIT 3");
