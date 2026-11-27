@@ -98,6 +98,7 @@ const NAVS = [
   ['moments', '说说（Moments）'],
   ['comments', '评论（Comments）'],
   ['media', '媒体库（Media）'],
+  ['tags', '标签（Tags）'],
   ['friends', '友链（Links）'],
   ['settings', '设置（Settings）'],
   ['stats', '统计（Stats）'],
@@ -1224,6 +1225,71 @@ async function viewMedia(main) {
 }
 
 /* ================= 友链管理 ================= */
+/* ================= 标签管理 ================= */
+async function viewTags(main) {
+  const data = await api('GET', '/api/admin/tags');
+  const tags = data.tags || [];
+  const unused = tags.filter((t) => !t.post_count).length;
+  main.innerHTML = `
+    <div class="card">
+      <h3>标签（Tags）</h3>
+      <p class="hint">改名会同步更新标签的访问地址（slug）；合并是把一个标签的文章全部改挂到另一个标签、再删掉它；删除只摘掉标签，文章本身不动。没有文章在用的空标签可以一键清理。</p>
+      <div class="btnrow" style="margin-bottom:10px"><button class="btn sm" id="tagPrune" ${unused ? '' : 'disabled'}>清理未使用标签（${unused} 个）</button></div>
+      <div id="tagList"></div>
+    </div>`;
+  const list = $('#tagList', main);
+  list.innerHTML = tags.length ? tags.map((t) => `
+    <div class="row"><div class="main">
+      <div class="ttl">${esc(t.name)} <span class="pill">${t.post_count} 篇</span></div>
+      <div class="meta">slug：${esc(t.slug)} · 前台 /tags/${esc(t.slug)}</div></div>
+      <div class="ops">
+        <button class="btn sm" data-trename="${t.id}">改名</button>
+        <button class="btn sm" data-tmerge="${t.id}">合并</button>
+        <button class="btn sm danger" data-tdel="${t.id}">删除</button>
+      </div></div>`).join('') : '<p class="empty">还没有标签。</p>';
+  $('#tagPrune', main).addEventListener('click', async () => {
+    if (!await confirmModal('清理未使用标签', `确定删除 ${unused} 个没有文章在用的标签吗？`, '清理')) return;
+    try { const r = await api('POST', '/api/admin/tags/prune', {}); toast(`已清理 ${r.pruned} 个`); go('tags'); }
+    catch (err) { toast(err.message, true); }
+  });
+  list.addEventListener('click', async (e) => {
+    const rn = e.target.closest('[data-trename]'); const mg = e.target.closest('[data-tmerge]'); const del = e.target.closest('[data-tdel]');
+    try {
+      if (rn) {
+        const t = tags.find((x) => x.id === Number(rn.dataset.trename));
+        openModal('改名', `<label class="f"><span>新名字</span><input type="text" id="tagNewName" value="${esc(t.name)}" maxlength="30"></label>`, [
+          { label: '取消', cls: 'ghost', onClick: (close) => close() },
+          { label: '保存', cls: 'primary', onClick: async (close) => {
+            const name = $('#tagNewName').value.trim();
+            if (!name) { toast('名字不能为空', true); return; }
+            try { await api('PUT', `/api/admin/tags/${t.id}`, { name }); close(); toast('已改名'); go('tags'); }
+            catch (err) { toast(err.message, true); }
+          } },
+        ]);
+      }
+      if (mg) {
+        const t = tags.find((x) => x.id === Number(mg.dataset.tmerge));
+        const others = tags.filter((x) => x.id !== t.id);
+        if (!others.length) { toast('没有别的标签可合并', true); return; }
+        openModal('合并标签', `<p class="hint">把「${esc(t.name)}」的 ${t.post_count} 篇文章改挂到下面选的标签，并删掉「${esc(t.name)}」。</p>
+          <label class="f"><span>合并到</span><select id="tagMergeInto">${others.map((o) => `<option value="${o.id}">${esc(o.name)}（${o.post_count} 篇）</option>`).join('')}</select></label>`, [
+          { label: '取消', cls: 'ghost', onClick: (close) => close() },
+          { label: '合并', cls: 'primary', onClick: async (close) => {
+            try { await api('POST', `/api/admin/tags/${t.id}/merge`, { into: Number($('#tagMergeInto').value) }); close(); toast('已合并'); go('tags'); }
+            catch (err) { toast(err.message, true); }
+          } },
+        ]);
+      }
+      if (del) {
+        const t = tags.find((x) => x.id === Number(del.dataset.tdel));
+        if (await confirmModal('删除标签', `确定删除标签「${t.name}」吗？它名下的 ${t.post_count} 篇文章只是摘掉这个标签，文章不删。`, '删除')) {
+          await api('DELETE', `/api/admin/tags/${t.id}`); toast('已删除'); go('tags');
+        }
+      }
+    } catch (err) { toast(err.message, true); }
+  });
+}
+
 async function viewFriends(main) {
   const data = await api('GET', '/api/admin/friends');
   main.innerHTML = `
@@ -1675,6 +1741,7 @@ const VIEWS = {
   moments: viewMoments,
   comments: viewComments,
   media: viewMedia,
+  tags: viewTags,
   friends: viewFriends,
   settings: viewSettings,
   stats: viewStats,
