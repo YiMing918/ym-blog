@@ -476,6 +476,22 @@ const failed = results.filter((r) => !r.pass);
   const tagAll = (await resp.json()).data?.tags || [];
   check('【三批】标签全集（含文章计数）', resp.status === 200 && tagAll.some((t) => t.name === '冒烟' && t.post_count >= 1));
 
+  // 标签管理（v1.2.16）：改名 / 同名拒绝 / 合并 / 删除（文章不删）
+  const smokeTag = tagAll.find((t) => t.name === '冒烟');
+  const testTag = tagAll.find((t) => t.name === '测试');
+  resp = await req('PUT', `/api/admin/tags/${smokeTag.id}`, { body: { name: '冒烟二' }, headers: { 'X-Requested-With': 'fetch' } });
+  check('【标签管理】改名成功且 slug 同步', resp.status === 200 && (await resp.json()).data?.tag?.slug === '冒烟二');
+  resp = await req('PUT', `/api/admin/tags/${testTag.id}`, { body: { name: '冒烟二' }, headers: { 'X-Requested-With': 'fetch' } });
+  check('【标签管理】改成已存在的同名被拒绝', resp.status === 400);
+  resp = await req('POST', `/api/admin/tags/${testTag.id}/merge`, { body: { into: smokeTag.id }, headers: { 'X-Requested-With': 'fetch' } });
+  check('【标签管理】合并后文章改挂目标标签', resp.status === 200 && (await resp.json()).data?.post_count >= 1);
+  resp = await req('GET', '/api/admin/tags');
+  check('【标签管理】被合并的标签已消失', !((await resp.json()).data?.tags || []).some((t) => t.name === '测试'));
+  resp = await req('DELETE', `/api/admin/tags/${smokeTag.id}`, { headers: { 'X-Requested-With': 'fetch' } });
+  check('【标签管理】删除标签成功', resp.status === 200);
+  resp = await req('GET', `/api/admin/posts/${postId}`);
+  check('【标签管理】删标签后文章还在', resp.status === 200);
+
   // 缺口 6：post 详情卫生（无 password_hash，有 has_password）
   resp = await req('GET', `/api/admin/posts/${postId}`);
   const detailPost = (await resp.json()).data?.post;
