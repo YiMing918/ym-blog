@@ -52,6 +52,32 @@ async function recountMediaRef(env, mediaRow) {
   return n;
 }
 
+// 列表页批量重算引用数（口径与 recountMediaRef 完全一致）：旧写法逐条调
+// recountMediaRef，每条 3 次查询 + 1 次写，其中正文引用是 instr(content_md)
+// 全表扫——一页 30 条要把文章全表扫 30 遍，媒体库列表慢到 17 秒以上
+// （2026-11-27 全量实测）。改为文章全表只读一次、在内存里数；封面计数
+// 顺带在同一遍里数完；说说用一次分组查询；只有数值变了的行才回写。
+async function recountMediaRefs(env, rows) {
+  if (!rows.length) return;
+  const posts = await all(env, "SELECT content_md, cover_media_id FROM posts WHERE status != 'trash'");
+  const moments = await all(env, "SELECT media_id, COUNT(*) AS n FROM moments WHERE status != 'trash' AND media_id IS NOT NULL GROUP BY media_id");
+  const settings = await getSettings(env);
+  const momentMap = new Map(moments.map((r) => [Number(r.media_id), r.n]));
+  const avatarId = Number(settings.avatar_media_id || 0);
+  for (const m of rows) {
+    let n = momentMap.get(Number(m.id)) || 0;
+    if (avatarId === Number(m.id)) n += 1;
+    for (const p of posts) {
+      if (p.cover_media_id != null && Number(p.cover_media_id) === Number(m.id)) n += 1;
+      if (m.r2_key && p.content_md && p.content_md.includes(m.r2_key)) n += 1;
+    }
+    if (n !== m.ref_count) {
+      m.ref_count = n;
+      await run(env, 'UPDATE media SET ref_count = ? WHERE id = ?', n, m.id);
+    }
+  }
+}
+
 // 发布/更新管线：body 字段 → posts 行；status 决定走向
 async function applyPostWrite(env, post, body, { isNew = false } = {}) {
   const t = nowSec();
@@ -390,8 +416,8 @@ export async function handleAdminApi(env, request, method, path, url) {
     const rows = await all(env, `SELECT * FROM media WHERE ${conds.join(' AND ')} ORDER BY created_at DESC LIMIT ? OFFSET ?`, ...params, per, (page - 1) * per);
     // 列表里显示的“被引用数”要当场重算：ref_count 只在删文件时才刷新，
     // 上传/发文/换封面后存量值还是 0，列表会一直显示“被 0 篇引用”。
-    // 只算当前这一页（30 条），不扫全库。
-    for (const m of rows) m.ref_count = await recountMediaRef(env, m);
+    // 只算当前这一页（30 条）；批量算法见 recountMediaRefs（别退回逐条扫）。
+    await recountMediaRefs(env, rows);
     return json({ media: rows.map((m) => ({ ...m, url: publicMediaUrl(env, m.r2_key) })), usage: await mediaUsage(env), page, per });
   }
 
