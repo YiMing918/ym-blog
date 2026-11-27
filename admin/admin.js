@@ -1109,7 +1109,12 @@ async function viewMedia(main) {
     </div>`;
   let trashMode = false;
   const renderGrid = (rows) => {
-    $('#mGrid', main).innerHTML = rows.length ? rows.map((m) => `
+    const grid = $('#mGrid', main);
+    // 列表请求慢时用户可能已经切到别的页面：#mGrid 不在了就丢弃这次结果，
+    // 别把 innerHTML 的报错弹到别的页面上（2026-11-27 全量实测：设置/账号页
+    // 底部那条红色报错就是媒体回收站的迟到请求打过去的）。
+    if (!grid) return;
+    grid.innerHTML = rows.length ? rows.map((m) => `
       <div class="mitem">
         <div class="thumb">${m.kind === 'image' ? `<img src="${esc(m.url)}" alt="" loading="lazy">` : m.kind === 'video' ? `<video src="${esc(m.url)}" preload="metadata"></video>` : '<span style="font-size:34px">📄</span>'}</div>
         <div class="info">
