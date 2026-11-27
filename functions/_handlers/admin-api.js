@@ -200,6 +200,48 @@ export async function handleAdminApi(env, request, method, path, url) {
     return json({ tags: rows });
   }
 
+  // 标签管理（v1.2.16 新增，后台「标签」页）：清理未使用 / 改名 / 合并 / 删除。
+  // 删除与合并都只动标签与挂接关系，文章本身永不删。
+  if (method === 'POST' && path === '/api/admin/tags/prune') {
+    const rows = await all(env, `SELECT t.id FROM tags t LEFT JOIN post_tags pt ON pt.tag_id = t.id WHERE pt.post_id IS NULL`);
+    for (const r of rows) await run(env, 'DELETE FROM tags WHERE id = ?', r.id);
+    return json({ pruned: rows.length });
+  }
+  const tagMatch = path.match(/^\/api\/admin\/tags\/(\d+)(\/merge)?$/);
+  if (tagMatch) {
+    const tagId = Number(tagMatch[1]);
+    const tag = await first(env, 'SELECT * FROM tags WHERE id = ?', tagId);
+    if (!tag) throw notFound('标签不存在');
+    if (method === 'PUT' && !tagMatch[2]) {
+      const body = await readJson(request);
+      const name = String(body.name || '').trim().slice(0, 30);
+      if (!name) throw badRequest('标签名不能为空');
+      const nslug = slugifyTitle(name) || `tag-${tagId}`;
+      const clash = await first(env, 'SELECT id FROM tags WHERE slug = ? AND id != ?', nslug, tagId);
+      if (clash) throw badRequest('已有一个同名标签（slug 相同），请用「合并」把两个标签并成一个');
+      await run(env, 'UPDATE tags SET name = ?, slug = ? WHERE id = ?', name, nslug, tagId);
+      return json({ tag: { ...tag, name, slug: nslug } });
+    }
+    if (method === 'DELETE' && !tagMatch[2]) {
+      const links = await first(env, 'SELECT COUNT(*) AS n FROM post_tags WHERE tag_id = ?', tagId);
+      await run(env, 'DELETE FROM post_tags WHERE tag_id = ?', tagId);
+      await run(env, 'DELETE FROM tags WHERE id = ?', tagId);
+      return json({ ok: true, removed_links: links ? links.n : 0 });
+    }
+    if (method === 'POST' && tagMatch[2] === '/merge') {
+      const body = await readJson(request);
+      const intoId = Number(body.into) || 0;
+      if (!intoId || intoId === tagId) throw badRequest('请选择要合并到的另一个标签');
+      const target = await first(env, 'SELECT * FROM tags WHERE id = ?', intoId);
+      if (!target) throw notFound('目标标签不存在');
+      await run(env, 'INSERT OR IGNORE INTO post_tags (post_id, tag_id) SELECT post_id, ? FROM post_tags WHERE tag_id = ?', intoId, tagId);
+      await run(env, 'DELETE FROM post_tags WHERE tag_id = ?', tagId);
+      await run(env, 'DELETE FROM tags WHERE id = ?', tagId);
+      const cnt = await first(env, 'SELECT COUNT(*) AS n FROM post_tags WHERE tag_id = ?', intoId);
+      return json({ ok: true, into: intoId, post_count: cnt ? cnt.n : 0 });
+    }
+  }
+
   // 服务端渲染预览：与 publish 管线同一个 renderMarkdown，保证编辑器预览与发布口径一致
   if (method === 'POST' && path === '/api/admin/render') {
     const body = await readJson(request);
