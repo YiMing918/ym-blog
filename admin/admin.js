@@ -124,13 +124,19 @@ async function refreshMe() {
   applyAppearance(); updatePendingBadge();
 }
 
+let navSeq = 0;
 function go(view, arg) {
   S.view = view;
+  const seq = ++navSeq;
   $$('#viewnav button').forEach((b) => b.setAttribute('aria-current', b.dataset.view === view ? 'page' : 'false'));
   const main = $('#view');
   main.innerHTML = '<p class="loading">加载中…</p>';
   const fn = VIEWS[view];
   Promise.resolve(fn ? fn(main, arg) : null).catch((e) => {
+    // 切页竞态收口：某个页面还没加载完就切走时，它迟到的失败（或 401）
+    // 别再糊到当前页上——2026-11-27 实测里媒体页的迟到报错就是这样
+    // 跑到设置/账号页去的（当时另在媒体渲染处补了空守卫，这里是总闸）。
+    if (seq !== navSeq) return;
     if (e.status === 401) return showLogin('登录已过期，请重新登录');
     main.innerHTML = `<div class="card"><h3>加载失败</h3><p class="hint">${esc(e.message)}</p>
       <button class="btn" onclick="location.reload()">刷新重试</button></div>`;
