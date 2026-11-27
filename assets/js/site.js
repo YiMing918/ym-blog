@@ -16,6 +16,19 @@
     onScroll();
   }
 
+  // 回到顶部：滚动超过 600px 后右下角出现，长文章不用一路划回去（2026-11-27 全量实测补）
+  var toTop = document.createElement('button');
+  toTop.type = 'button';
+  toTop.className = 'to-top';
+  toTop.title = '回到顶部';
+  toTop.setAttribute('aria-label', '回到顶部');
+  toTop.textContent = '↑';
+  document.body.appendChild(toTop);
+  var onScrollTop = function () { toTop.classList.toggle('show', window.scrollY > 600); };
+  document.addEventListener('scroll', onScrollTop, { passive: true });
+  onScrollTop();
+  toTop.addEventListener('click', function () { window.scrollTo({ top: 0, behavior: 'smooth' }); });
+
   // 深浅色：站点默认（data-theme）之上，访客可用按钮循环 auto→light→dark，存 localStorage
   var root = document.documentElement;
   var saved = null;
