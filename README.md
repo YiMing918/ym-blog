@@ -2,7 +2,7 @@
 
 一个**带完整网页后台的真·动态博客**，全部跑在 Cloudflare 免费额度里：不用租服务器、不用数据库主机、不用备案。手机、平板、电脑打开后台就能写文章、传图、传视频、改站名和颜色，像用 App 一样点点点。适合个人小站，也按通用产品标准做了额度保护与防刷——别人拿去部署、人多了同样扛得住。
 
-![版本](https://img.shields.io/badge/版本-v1.2.15-blue) ![Cloudflare Pages](https://img.shields.io/badge/Cloudflare-Pages%20%2B%20Functions-f38020) ![D1](https://img.shields.io/badge/数据库-D1-blue) ![R2](https://img.shields.io/badge/存储-R2-9cf) ![License](https://img.shields.io/badge/license-MIT-green) ![Price](https://img.shields.io/badge/运行成本-免费额度内-brightgreen)
+![版本](https://img.shields.io/badge/版本-v1.2.16-blue) ![Cloudflare Pages](https://img.shields.io/badge/Cloudflare-Pages%20%2B%20Functions-f38020) ![D1](https://img.shields.io/badge/数据库-D1-blue) ![R2](https://img.shields.io/badge/存储-R2-9cf) ![License](https://img.shields.io/badge/license-MIT-green) ![Price](https://img.shields.io/badge/运行成本-免费额度内-brightgreen)
 
 **[下载最新版](https://github.com/YiMing918/ym-blog/releases/latest) · [博客教程](https://bk.ymaym.top/post/ym-blog-guide) · [视频教程（YouTube）](https://youtu.be/2qfl1gBppKE)**
 
@@ -918,6 +918,8 @@ A：后台文章列表里删除即可（进回收站，30 天内可还原）；�
 - 新增探活、保活、自动更新与自动任务全表、备份与恢复手把手（含通道二加密包的下载、openssl 解密与整库导入步骤）；原有功能清单、配置表、FAQ、隐私说明、已知边界、版本历史与 Fork 说明全部保留。
 
 
+### v1.2.16（2026-11-27）· 后台新增标签管理页
+后台导航新增「标签」页：全部标签带文章数一览，可改名（slug 同步更新）、合并（把一个标签的文章改挂到另一个并删掉它）、删除（只摘标签、文章不删），还有一键清理未使用标签。接口为 PUT/DELETE /api/admin/tags/:id、POST /api/admin/tags/:id/merge、POST /api/admin/tags/prune，冒烟新增 6 项检查。
 ### v1.2.15（2026-11-27）· 后台切页竞态收口
 后台页面切换加一道总闸：某个页面还没加载完就切到别的页时，它迟到的失败提示（包括登录过期的跳转）不再糊到当前页上。起因是实测里媒体页的一次迟到报错跑到了设置/账号页底部——那一处当时已单独补了守卫，这次把整类问题在路由层收口。
 
